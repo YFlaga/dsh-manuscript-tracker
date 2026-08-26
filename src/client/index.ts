@@ -280,6 +280,6 @@ export function apply(ctx: ClientContext): void {
     name: 'settings.section',
     id: 'paper-checker',
     order: 50,
-    label: () => '投稿检查',
+    label: () => '投稿检查插件',
   }, (props: any) => React.createElement(PaperCheckerPanel, { ...props, api }))), 'paper-checker: settings section')
 }
