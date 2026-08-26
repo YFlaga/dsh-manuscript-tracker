@@ -581,14 +581,29 @@ function pushServerChan(key: string, title: string, desp: string): Promise<boole
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
       timeout: 20000,
     }, (res) => {
-      res.resume()
-      res.on('end', () => resolve(res.statusCode === 200))
+      let buf = ''
+      res.on('data', (chunk) => { buf += chunk })
+      res.on('end', () => {
+        // Server酱：HTTP 200 不代表成功，业务 code===0 才是
+        try {
+          const parsed = JSON.parse(buf)
+          resolve(res.statusCode === 200 && parsed && parsed.code === 0)
+        } catch {
+          resolve(res.statusCode === 200)
+        }
+      })
     })
     req.on('error', () => resolve(false))
     req.on('timeout', () => { req.destroy(); resolve(false) })
     req.write(body)
     req.end()
   })
+}
+
+/** 'HH:mm' → 当天分钟数（补跑判断用）。 */
+function tMin(s: string): number {
+  const [h, m] = String(s ?? '').split(':').map(Number)
+  return (h || 0) * 60 + (m || 0)
 }
 
 // ============ 主检查流程 ============
@@ -866,13 +881,14 @@ export function apply(ctx: AppContext, config: Config): void {
   ctx.effect(() => disposeTool, 'paper-checker: tool')
 
   // 守护定时：每天到点自动检查（配置变化后下次 tick 自动用新值）
+  // 触发条件：当天还没跑过，且当前时刻已到目标时刻 —— DSH 在目标时刻未运行(关机/休眠/晚启动)时，启动后自动补跑当天检查
   let lastRunDate = ''
   ctx.setInterval(() => {
     void (async () => {
       const cfg = getConfig()
       if (!cfg.scheduleEnabled || cfg.journals.length === 0) return
       const { date, time } = nowInTz(cfg.timezone)
-      if (time === cfg.time && lastRunDate !== date) {
+      if (lastRunDate !== date && tMin(time) >= tMin(cfg.time)) {
         lastRunDate = date
         const dir = cfg.reportDir || defaultReportDir()
         log(dir, '定时检查开始 date=' + date + ' time=' + time)
