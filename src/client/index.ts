@@ -189,6 +189,7 @@ function PaperCheckerPanel(props: any): any {
       ),
     ),
     field('Server酱 SendKey（微信推送，可留空）', 'serverchanKey', 'SCT...'),
+    field('Playwright 浏览器目录（可留空，留空用系统默认 %LOCALAPPDATA%\\ms-playwright）', 'browserPath', 'E:\\...\\pw-browsers'),
     React.createElement('div', { style: s.row },
       React.createElement('label', { style: s.label }, '汇报目标会话（定时检查完成后在对话内汇报）'),
       React.createElement('div', { style: { display: 'flex', gap: 8 } },

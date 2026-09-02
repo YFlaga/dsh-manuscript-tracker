@@ -1,7 +1,7 @@
 /**
  * @dsh-external/dsh-paper-checker
  * 检查学术期刊投稿审稿状态并定时汇报。
- * - Editorial Manager 期刊：内置确定性 Playwright 抓取（channel msedge）
+ * - Editorial Manager 期刊：内置确定性 Playwright 抓取（Playwright 内置 Chromium，无头）
  * - 其他投稿系统（system='other'）：回退信号，交由 AI 用浏览器工具处理
  * - 守护定时：每天到点自动检查 → 写报告 → 推微信（Server酱）
  */
@@ -10,10 +10,14 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import https from 'node:https'
+import { createRequire } from 'node:module'
+// 用 createRequire(import.meta.url) 强制标准 Node 解析 playwright-core（命中插件 node_modules，
+// 绕开 DSH 宿主对动态 import 的自定义解析——后者会解析到错误的 playwright-core 副本）
+const pwRequire = createRequire(import.meta.url)
 
 type AppContext = Context & {
   setInterval(fn: () => void, ms: number): any
@@ -47,6 +51,7 @@ export interface Config {
   reportSessionId: string
   discoverProvider: string
   discoverModel: string
+  browserPath: string
 }
 
 export const Config = z.object({
@@ -66,6 +71,8 @@ export const Config = z.object({
   reportSessionId: z.string().default(''),
   discoverProvider: z.string().default(''),
   discoverModel: z.string().default(''),
+  // Playwright 浏览器目录（可选的 PLAYWRIGHT_BROWSERS_PATH；留空用系统默认 %LOCALAPPDATA%\ms-playwright）
+  browserPath: z.string().default(''),
 })
 
 // ============ 数据结构 ============
@@ -327,13 +334,29 @@ function normalizeRows(parsed: { headers: string[]; rows: string[][] } | null): 
   }).filter((s) => s.number || s.title)
 }
 
+/** 启动 Playwright Chromium；browserPath 非空时用其中的 headless shell（版本号取自 playwright 期望值） */
+async function launchChromium(browserPath?: string): Promise<any> {
+  const { chromium } = pwRequire('playwright-core')
+  if (browserPath) {
+    const expected = chromium.executablePath()
+    const rev = expected.match(/chromium[_-]?(\d+)/)?.[1]
+    if (rev) {
+      const exe = join(browserPath, `chromium_headless_shell-${rev}`, 'chrome-win', 'headless_shell.exe')
+      if (existsSync(exe)) {
+        process.env.PLAYWRIGHT_BROWSERS_PATH = browserPath
+        return chromium.launch({ headless: true, executablePath: exe })
+      }
+    }
+  }
+  return chromium.launch({ headless: true })
+}
+
 /** 登录 EM 期刊并返回作者主菜单信息（用于「新增期刊」自动识别 name/sections）。 */
-async function loginAndGetMenu(baseUrl: string, username: string, password: string): Promise<{
+async function loginAndGetMenu(baseUrl: string, username: string, password: string, browserPath?: string): Promise<{
   title: string; bodyText: string; counts: Record<string, number>; links: Record<string, string>; error?: string
 }> {
   const dbg: string[] = []
-  const { chromium } = await import('playwright-core')
-  const browser = await chromium.launch({ channel: 'msedge', headless: true })
+  const browser = await launchChromium(browserPath)
   try {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'en-US' })
     const page = await ctx.newPage()
@@ -377,10 +400,9 @@ async function loginAndGetMenu(baseUrl: string, username: string, password: stri
   }
 }
 
-async function scrapeEmJournal(j: JournalConfig): Promise<JournalResult> {
+async function scrapeEmJournal(j: JournalConfig, browserPath?: string): Promise<JournalResult> {
   const dbg: string[] = []
-  const { chromium } = await import('playwright-core')
-  const browser = await chromium.launch({ channel: 'msedge', headless: true })
+  const browser = await launchChromium(browserPath)
   try {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'en-US' })
     const page = await ctx.newPage()
@@ -613,7 +635,7 @@ async function runCheck(config: Config): Promise<JournalResult[]> {
     if (j.system === 'other') {
       results.push({ journal: j.name, system: 'other' })
     } else {
-      results.push(await scrapeEmJournal(j))
+      results.push(await scrapeEmJournal(j, config.browserPath))
     }
   }
   return results
@@ -827,7 +849,7 @@ export function apply(ctx: AppContext, config: Config): void {
           const username = String(body?.username ?? '').trim()
           const password = String(body?.password ?? '')
           if (!baseUrl || !username || !password) return send(400, { ok: false, error: '网址/账号/密码不能为空' })
-          const menu = await loginAndGetMenu(baseUrl, username, password)
+          const menu = await loginAndGetMenu(baseUrl, username, password, getConfig().browserPath)
           if (menu.error) return send(200, { ok: false, error: menu.error })
           // 分区以页面确定性探测为准：主菜单里全部带计数分区（含 count=0，按菜单顺序），
           // 这就是「网站有哪些分区」的结构——保存后每次检查时配置优先抓取，

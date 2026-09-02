@@ -2,7 +2,7 @@
 
 检查学术期刊投稿审稿状态并定时汇报的 DSH 插件。
 
-- **Editorial Manager 期刊**：内置确定性 Playwright 抓取（`channel: msedge`，用系统 Edge，无需下载浏览器）。
+- **Editorial Manager 期刊**：内置确定性 Playwright 抓取（Playwright 内置 Chromium，无头模式；浏览器目录可用 `browserPath` 配置）。
 - **自动识别稿件阶段**：主菜单上所有「活跃投稿分区」自动抓取（审稿 submission / 修改 revision / 生产 production），报告按分区分组 + 摘要统计三阶段篇数。
 - **已决策稿件**：自动抓取 `Submissions with a Decision`（含拒绝/接受结果），但只在决策后 7 天内列进报告（避免历史决策刷屏），独立分组「📂 近期决策（7 天内）」。
 - **其他投稿系统**（`system: 'other'`）：返回「回退信号」，由 AI 用浏览器工具交互式处理（方案 C 混合模式）。
@@ -18,7 +18,7 @@
 
 - DSH 客户端（任意 profile，示例用 `web`）。
 - 命令行里有 `dsh` 与 `pnpm`（DSH 插件管理的标准工具链）。
-- 电脑已装 Microsoft Edge（Windows 默认有，用于确定性抓取）。
+- Playwright Chromium 浏览器：运行一次 `npx playwright install chromium` 下载（约 300MB），或在设置面板配置 `browserPath` 指向已准备好的浏览器目录（见下）。
 
 ### 方式一：官方 CLI（推荐）
 
@@ -83,6 +83,10 @@ reportDir: ''                     # 报告目录；留空默认 ~/.dsh/paper-che
 reportSessionId: ''               # 可选：检查结果同步汇报到某个对话会话
 discoverProvider: ''              # 可选：自动识别新期刊用的模型 Provider（留空用全局默认）
 discoverModel: ''                 # 可选：自动识别新期刊用的模型（留空用全局默认）
+browserPath: ''                   # 可选：Playwright 浏览器目录（PLAYWRIGHT_BROWSERS_PATH 的目录名布局）。
+                                  #   留空用系统默认 %LOCALAPPDATA%\ms-playwright。
+                                  #   若插件报「Executable doesn't exist at ...chromium_headless_shell-XXXX...」，
+                                  #   在目录下放置对应的 chromium_headless_shell-XXXX\chrome-win\headless_shell.exe 即可。
 ```
 
 ## 字段说明
@@ -101,6 +105,7 @@ discoverModel: ''                 # 可选：自动识别新期刊用的模型�
 | `reportDir` | string | 报告输出目录 |
 | `reportSessionId` | string | 检查结果同步汇报的会话 id（可选） |
 | `discoverProvider` / `discoverModel` | string | 自动识别新期刊所用模型（可选，留空用全局默认） |
+| `browserPath` | string | Playwright 浏览器目录（可选；留空用系统默认 %LOCALAPPDATA%\\ms-playwright） |
 
 ## 输出
 
@@ -111,13 +116,12 @@ discoverModel: ''                 # 可选：自动识别新期刊用的模型�
 
 ## 依赖
 
-- 本机需安装 Microsoft Edge（Windows 默认有）。
-- `playwright-core`（声明为 dependency，安装时自动带入；确定性抓取只驱动本机 Edge，不下载浏览器）。
+- Playwright Chromium：运行 `npx playwright install chromium` 下载（默认位置 `%LOCALAPPDATA%\ms-playwright`）；也可用 `browserPath` 指向自备目录（含 `chromium_headless_shell-XXXX\chrome-win\headless_shell.exe`）。
+- `playwright-core`（声明为 dependency，安装时自动带入；确定性抓取驱动 Playwright 内置 Chromium）。
 
 ## 说明
 
-- Editorial Manager 登录兼容两种形态：直接表单 / 折叠在「Alternatively, use your username and password」里。
-- 新增期刊自动探测：面板「自动识别新期刊」登录后确定性探测主菜单上**全部**投稿分区（含当前 0 篇的分区，按菜单顺序，排除 Task Assignments 任务区与 with Production Completed 已完成历史）写入 `sections`，模型只识别期刊名/系统类型（期刊名可能识别不准，面板里可直接修改后加入）；保存后每次检查按探测结果抓取，count=0 分区自动跳过、一有稿件即被抓到。老配置未写 `sections` 时，检查时自动发现 count>0 的投稿分区补抓（排除 New Submissions 入口与 with Production Completed 已完成历史）。
+- Editorial Manager 登录兼容两种形态：直接表单 / 折叠在「Alternatively, use your username and password」里。- 新增期刊自动探测：面板「自动识别新期刊」登录后确定性探测主菜单上**全部**投稿分区（含当前 0 篇的分区，按菜单顺序，排除 Task Assignments 任务区与 with Production Completed 已完成历史）写入 `sections`，模型只识别期刊名/系统类型（期刊名可能识别不准，面板里可直接修改后加入）；保存后每次检查按探测结果抓取，count=0 分区自动跳过、一有稿件即被抓到。老配置未写 `sections` 时，检查时自动发现 count>0 的投稿分区补抓（排除 New Submissions 入口与 with Production Completed 已完成历史）。
 - 已决策分区：`Submissions with a Decision` 也自动纳入抓取（跨分页遍历全部历史，最多 8 页），报告层只显示决策日期在最近 7 天内的稿件；决策日期取 Status Date / Final Decision Date / Decision Date 列。
 - 表格兼容：`table#datatable` 与 `table#GridSubmissions`（表头在 tbody 首行 `<th>`）两种 EM 结构都能解析。
 - 状态翻译：Under Review→审稿中、In Production→生产中、Needs Author Action→等待作者操作、Major/Minor Revision→大修/小修、Awaiting Author Approval→等待作者确认 等 40+ 状态，另有前缀/关键词模糊匹配（含 Reject 即→已拒稿、含 Accept 即→已接受、含 Revis 即→修改中，可覆盖 Completed - Reject / Completed - Accept 等组合状态）。
