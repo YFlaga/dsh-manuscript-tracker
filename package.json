@@ -5,6 +5,7 @@
   "type": "module",
   "main": "./lib/index.js",
   "files": [
+    "locale",
     "lib/index.js",
     "lib/client.js",
     "cordis.patch.yml"
@@ -24,7 +25,8 @@
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "dsh": {
     "bundle": {

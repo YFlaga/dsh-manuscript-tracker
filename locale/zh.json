@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "投稿检查 (dsh-paper-checker)",
+    "description": "检查学术期刊投稿审稿状态并定时汇报：Editorial Manager 期刊走确定性 Playwright 抓取，其他投稿系统回退给 AI 用浏览器工具处理"
+  }
+}

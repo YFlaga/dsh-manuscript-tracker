@@ -10,7 +10,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import https from 'node:https'
@@ -62,6 +62,17 @@ export const Config = z.object({
     password: z.string(),
     sections: z.array(z.string()).default([]),
     system: z.union([z.const('editorial-manager'), z.const('other')]).default('editorial-manager'),
+    // [自动识别] LLM 识别出的整份主菜单组织结构：分区顺序、是否抓取、kind 与分组。
+    // 缺省时（模型失败或旧配置）检查流程走原来的确定性逻辑。
+    structure: z.object({
+      source: z.string().default('llm'),
+      model: z.string().default(''),
+      capturedAt: z.string().default(''),
+      name: z.string().default(''),
+      system: z.string().default(''),
+      groups: z.array(z.object({ title: z.string().default(''), sections: z.array(z.string()).default([]) })).default([]),
+      sections: z.array(z.object({ name: z.string().default(''), kind: z.string().default('active'), check: z.boolean().default(true) })).default([]),
+    }),
   })).default([]),
   time: z.string().default('08:00'),
   timezone: z.string().default('Asia/Shanghai'),
@@ -74,6 +85,31 @@ export const Config = z.object({
   // Playwright 浏览器目录（可选的 PLAYWRIGHT_BROWSERS_PATH；留空用系统默认 %LOCALAPPDATA%\ms-playwright）
   browserPath: z.string().default(''),
 })
+
+// DSH 0.2 的设置服务只在 schema 带 meta.volatile 时允许写入配置（dsh-settings 的
+// volatileForm()/isVolatilePath() 读 schema.meta.volatile），否则面板保存会报
+// `Plugin entry "paper-checker" has no volatile fields`。
+// 这里直接标 meta 并用 try/catch 兜住：schemastery 的 .volatile() 返回克隆、且旧版本没有该方法。
+try {
+  const schemaMeta = (Config as any).meta
+  if (schemaMeta) schemaMeta.volatile = true
+
+// [关键] DSH 的写入是按**字段路径**判断 volatile 的（docs: "Edit fields that plugins declare with .volatile()"）。
+// 只标根节点会让命名空间看起来可写（保存不再报错），但字段级写入会被判定为非 volatile 而静默丢弃——
+// 表现为"保存返回 ok、revision 递增，值却没变"。所以递归把每个子 schema 也标上。
+const __pcSeenSchema = new Set<any>()
+const markVolatilePC = (s: any, depth = 0): void => {
+  try {
+    if (!s || typeof s !== 'object' || depth > 6 || __pcSeenSchema.has(s)) return
+    __pcSeenSchema.add(s)
+    if (s.meta && typeof s.meta === 'object') s.meta.volatile = true
+    if (s.dict && typeof s.dict === 'object') for (const k of Object.keys(s.dict)) markVolatilePC(s.dict[k], depth + 1)
+    if (s.inner !== undefined) markVolatilePC(s.inner, depth + 1)
+    if (Array.isArray(s.list)) for (const x of s.list) markVolatilePC(x, depth + 1)
+  } catch { /* ignore */ }
+}
+markVolatilePC(Config)
+} catch { /* 保持原样 */ }
 
 // ============ 数据结构 ============
 interface Submission {
@@ -191,14 +227,308 @@ function nowInTz(timezone: string): { date: string; time: string } {
 }
 
 // ============ Editorial Manager 确定性抓取 ============
-async function waitForFrame(page: any): Promise<any | null> {
-  for (let i = 0; i < 30; i++) {
-    const f = page.frame({ name: 'content' })
-    // 必须等 iframe 真正加载出登录页（避免拿到 about:blank 空 frame）
-    if (f && f.url() && !f.url().includes('about:blank')) return f
-    await page.waitForTimeout(1000)
+/**
+ * 等 EM 把登录页载入 iframe。不再只认 name=content：遍历所有子 frame，谁先出现 login.asp
+ * 或 username 输入框就用谁（各期刊实例的命名与填充时机并不一致，且偶发长时间停在 about:blank）。
+ */
+async function waitForFrame(page: any, budgetMs = 45000): Promise<any | null> {
+  const deadline = Date.now() + budgetMs
+  let fallback: any = null
+  while (Date.now() < deadline) {
+    for (const f of page.frames()) {
+      if (f === page.mainFrame()) continue
+      const url = f.url() || ''
+      if (url.includes('login.asp') || url.includes('login.aspx')) return f
+      if (url && !url.includes('about:blank') && !fallback) fallback = f
+    }
+    for (const f of page.frames()) {
+      if (f === page.mainFrame()) continue
+      const has = await f.$("input[name='username']").then((x: any) => !!x).catch(() => false)
+      if (has) return f
+    }
+    await page.waitForTimeout(500)
   }
-  return page.frame({ name: 'content' })
+  return fallback ?? page.frame({ name: 'content' })
+}
+
+let __pcCtx: any = null;
+
+let __pcCwdUsed = "";
+
+async function __pcAttachWorkspace(sessionId: any) {
+  try {
+    if (!__pcCtx) return "no-ctx";
+    const reg = typeof __pcCtx.get === "function" ? __pcCtx.get("workspaceRegistry") : undefined;
+    if (!reg || typeof reg.list !== "function") return "no-registry";
+    const list = reg.list() || [];
+    let w = list.find((x: any) => x && Array.isArray(x.sessionIds) && x.sessionIds.includes(sessionId));
+    if (!w) {
+      let cwd = "";
+      try { cwd = cwdFromIndexPC(sessionId); } catch (e: any) { cwd = ""; }
+      if (cwd) w = list.find((x: any) => x && x.path && String(x.path).toLowerCase() === String(cwd).toLowerCase());
+    }
+    if (!w) w = list[0];
+    if (!w || typeof w.attachSession !== "function") return "no-workspace";
+    await w.attachSession(sessionId);
+    return "attached:" + String(w.id || w.path || "?");
+  } catch (e: any) { return "attach-err:" + String(e && e.message ? e.message : e); }
+}
+
+function __pcAgents() {
+  try {
+    const sc = (__pcCtx && typeof __pcCtx.get === "function") ? __pcCtx.get("sessionController") : null;
+    if (sc && sc.agents && typeof sc.agents.ensureSession === "function") return sc.agents;
+    if (sc && sc.agents) return sc.agents;
+  } catch (e: any) { /* ignore */ }
+  return __pcCtx && __pcCtx.agents ? __pcCtx.agents : null;
+}
+
+async function __pcLoadSession(sessionId: any, cwd: any) {
+  try {
+    // [local patch] cwd 为空会让宿主 ensureSession 执行 mkdir "" → ENOENT（实测错误原文）。
+    // 依次回退：会话 header → workspace 记录里的路径 → 进程当前目录。__pcCwdFallback
+    if (!cwd) {
+      try { const s = (__pcCtx.sessions && __pcCtx.sessions.get) ? __pcCtx.sessions.get(sessionId) : null; cwd = (s && s.header && s.header.cwd) || ""; } catch (e: any) { /* ignore */ }
+    }
+    if (!cwd) {
+      try {
+        const reg = (typeof __pcCtx.get === "function") ? __pcCtx.get("workspaceRegistry") : null;
+        const list = (reg && typeof reg.list === "function") ? (reg.list() || []) : [];
+        for (const w of list) {
+          const p = (w && w.record && (w.record.path || w.record.cwd)) || (w && w.path) || "";
+          if (p) { cwd = String(p); break; }
+        }
+      } catch (e: any) { /* ignore */ }
+    }
+    // [local patch] 权威 cwd 来源：storages/workspace.json 的 workspaces 表里，
+    // 哪个 workspace 的 sessionIds 含该会话，它的 path 就是该会话的 cwd。__pcWorkspaceJsonCwd
+    if (!cwd) {
+      try {
+        const __home = process.env.DSH_HOME || join(homedir(), ".dsh");
+        const __wp = join(__home, "storages", "workspace.json");
+        if (existsSync(__wp)) {
+          const __j = JSON.parse(readFileSync(__wp, "utf8"));
+          const __tbl = (__j && __j.tables && __j.tables.workspaces) || {};
+          for (const __k of Object.keys(__tbl)) {
+            const __w = __tbl[__k];
+            if (__w && Array.isArray(__w.sessionIds) && __w.sessionIds.includes(sessionId) && __w.path) { cwd = String(__w.path); break; }
+          }
+        }
+      } catch (e: any) { /* ignore */ }
+    }
+    if (!cwd) { try { cwd = process.cwd() || ""; } catch (e: any) { /* ignore */ } }
+    // [local patch] 无条件解析权威 cwd 并覆盖调用方值：__pcResolveCwd
+    try {
+      const __home = process.env.DSH_HOME || join(homedir(), ".dsh");
+      let __c = "";
+      const __wp = join(__home, "storages", "workspace.json");
+      if (existsSync(__wp)) {
+        const __j = JSON.parse(readFileSync(__wp, "utf8"));
+        const __tbl = (__j && __j.tables && __j.tables.workspaces) || {};
+        for (const __k of Object.keys(__tbl)) {
+          const __w = __tbl[__k];
+          if (__w && Array.isArray(__w.sessionIds) && __w.sessionIds.includes(sessionId) && __w.path) { __c = String(__w.path); break; }
+        }
+      }
+      if (!__c) {
+        const __sid = sessionId.startsWith("session-") ? sessionId : ("session-" + sessionId);
+        const __pc = join(__home, "storages", "session_projcache", "sessions", __sid + ".json");
+        if (existsSync(__pc)) {
+          const __jj = JSON.parse(readFileSync(__pc, "utf8"));
+          const __p = __jj && __jj.record && __jj.record.identity && __jj.record.identity.cwd;
+          if (__p) __c = String(__p);
+        }
+      }
+      if (__c) cwd = __c;
+      __pcCwdUsed = String(cwd || "");
+    } catch (e: any) { __pcCwdUsed = "err:" + String(e && e.message ? e.message : e); }
+    if (!__pcCtx || typeof __pcCtx.get !== "function") return "no-ctx";
+    const sc = __pcCtx.get("sessionController");
+    if (!sc) return "no-controller";
+    const __tries: any = [];
+    for (const nm of ["create", "resume", "createOrAdopt"]) {
+      if (typeof sc[nm] === "function") __tries.push([nm, () => sc[nm]({ sessionId, cwd })]);
+    }
+    for (const face of ["typertRemote", "commands", "remote"]) {
+      const fx = sc[face];
+      if (fx && typeof fx === "object") {
+        for (const nm of ["create", "resume"]) if (typeof fx[nm] === "function") __tries.push([face + "." + nm, () => fx[nm]({ sessionId, cwd })]);
+      }
+    }
+    const ag = sc.agents;
+    if (ag && typeof ag.ensureSession === "function") __tries.push(["agents.ensureSession", () => ag.ensureSession(sessionId, cwd, true)]);
+    const __pcErrs: any = [];
+    for (const [nm, fn] of __tries) {
+      try { const r = await fn(); if (r !== void 0) return "ok:" + nm; } catch (e: any) { __pcErrs.push(nm + "=" + String(e && e.message ? e.message : e).slice(0, 90)); }
+    }
+    return "none(" + __tries.length + "): " + (__pcErrs.join(" | ") || "无异常但返回 undefined");
+  } catch (e: any) { return "err:" + String(e && e.message ? e.message : e); }
+}
+
+async function __pcAwaitAgent(sessionId: any, ms: any) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    try { const a = ctxAgentsGet(sessionId); if (a && typeof a.followup === "function") return a; } catch (e: any) { /* ignore */ }
+    await new Promise((r: any) => setTimeout(r, 500));
+  }
+  return null;
+}
+
+function ctxAgentsGet(sessionId: any) {
+  try {
+    const sc = (__pcCtx && typeof __pcCtx.get === "function") ? __pcCtx.get("sessionController") : null;
+    const cands = [__pcCtx && __pcCtx.agents, sc && sc.agents, __pcAgents()];
+    for (const c of cands) if (c && typeof c.get === "function") { const a = c.get(sessionId); if (a) return a; }
+  } catch (e: any) { /* ignore */ }
+  return null;
+}
+
+function __pcBuildMsg(report: any) {
+  try {
+    return createUserMessage({
+      content: [{ type: "text", text: "⏰ 每日投稿状态自动汇报（插件 dsh-paper-checker）：\n\n" + report + "\n\n——请一句话确认收到即可，不要重新检查、不要调用工具。" }],
+      source: { kind: "user" }
+    });
+  } catch (e: any) { return report; }
+}
+
+function readPersistedPC() {
+  try {
+    const root = join(homedir(), ".dsh", "profiles");
+    const cands: any = [];
+    for (const prof of readdirSync(root)) {
+      const p = join(root, prof, "cordis.patch.yml");
+      try { if (existsSync(p)) cands.push({ p, m: statSync(p).mtimeMs }); } catch (e: any) { /* ignore */ }
+    }
+    // 关键：DSH 只写当前 profile 的那份，取 mtime 最新的，避免读到其它/旧 profile 的值
+    cands.sort((a: any, b: any) => b.m - a.m);
+    for (const c of cands) {
+      try {
+        const text = readFileSync(c.p, "utf8");
+        if (!text.includes("paper-checker")) continue;
+        const doc = __pcYaml(text);
+        const arr = Array.isArray(doc) ? doc : (doc && typeof doc === "object" ? Object.values(doc)[0] : null);
+        const list = Array.isArray(arr) ? arr : [];
+        const entry = list.find((x: any) => x && x.name === "@dsh-external/dsh-paper-checker") || list.find((x: any) => x && x.config);
+        if (entry && entry.config) return entry.config;
+      } catch (e: any) { /* 试下一份 */ }
+    }
+  } catch (e: any) { /* ignore */ }
+  return null;
+}
+
+function __pcYaml(text: any) {
+  const lines = text.split(/\r?\n/);
+  const parse = (i: any, indent: any) => {
+    let seq: any = null, map: any = null;
+    while (i < lines.length) {
+      const raw = lines[i];
+      const s = raw.trim();
+      if (s === "" || s.startsWith("#")) { i++; continue; }
+      const ind = raw.match(/^ */)[0].length;
+      if (ind < indent) break;
+      if (ind > indent) { i++; continue; }
+      const body = raw.slice(indent);
+      const keyRe = /^([A-Za-z_][\w.-]*):\s*(.*)$/;
+      if (body.startsWith("- ")) {
+        if (map) break;
+        if (!seq) seq = [];
+        const item = body.slice(2);
+        const m = keyRe.exec(item);
+        if (!m) { seq.push(__pcScalar(item.trim())); i++; continue; }
+        const obj: any = {};
+        if (m[2].trim() === "") { const r = parse(i + 1, indent + 4); obj[m[1]] = r[0]; i = r[1]; }
+        else { obj[m[1]] = __pcScalar(m[2].trim()); i++; }
+        while (i < lines.length) {
+          const r2 = lines[i]; const s2 = r2.trim();
+          if (s2 === "" || s2.startsWith("#")) { i++; continue; }
+          if (r2.match(/^ */)[0].length !== indent + 2) break;
+          const m2 = keyRe.exec(r2.slice(indent + 2));
+          if (!m2) break;
+          if (m2[2].trim() === "") { const r3 = parse(i + 1, indent + 4); obj[m2[1]] = r3[0]; i = r3[1]; }
+          else { obj[m2[1]] = __pcScalar(m2[2].trim()); i++; }
+        }
+        seq.push(obj);
+      } else {
+        if (seq) break;
+        if (!map) map = {};
+        const m = keyRe.exec(body);
+        if (!m) { i++; continue; }
+        if (m[2].trim() === "") { const r = parse(i + 1, indent + 2); map[m[1]] = r[0]; i = r[1]; }
+        else { map[m[1]] = __pcScalar(m[2].trim()); i++; }
+      }
+    }
+    return [seq !== null ? seq : (map !== null ? map : null), i];
+  };
+  return parse(0, lines.findIndex((l: any) => l.trim().startsWith("- ")) === 0 ? 0 : 0)[0];
+}
+
+function __pcScalar(v: any) {
+  if (v === "\"\"" || v === "''") return "";
+  if (v.length > 1 && ((v[0] === "\"" && v[v.length - 1] === "\"") || (v[0] === "'" && v[v.length - 1] === "'"))) return v.slice(1, -1);
+  if (v === "true") return true;
+  if (v === "false") return false;
+  if (v === "[]") return [];
+  if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v);
+  return v;
+}
+
+/**
+ * 打开期刊登录页并把登录帧准备到可见状态，失败自动重试。
+ * 加固：EM 靠页面自身 JS 把登录页填进 content iframe，这一步在插件进程里实测可能一直不发生
+ * （三次尝试共 90 多秒都停在 about:blank，而同机独立进程 2 秒就绪）。所以不再依赖那段 JS：
+ * 等很短时间没动静，就自己把 iframe 的 src 指到 <base>/login.asp（登录表单本来就在这个地址）。
+ * 另外挂一次诊断监听，把 playwright-core 位置、浏览器版本、失败请求与页面错误带进报错。
+ */
+async function openLoginFrame(page: any, baseUrl: string, dbg: string[], attempts = 3): Promise<any | null> {
+  try {
+    if (!page.__pcDiag) {
+      page.__pcDiag = true
+      dbg.push('pwcore=' + (typeof pwRequire?.resolve === 'function' ? pwRequire.resolve('playwright-core') : '?'))
+      dbg.push('browser=' + (page.context?.()?.browser?.()?.version?.() ?? '?'))
+      // 宿主进程若带代理环境变量，Chromium 会继承它，EM 的连接可能因此被中断；写进报错便于定位。
+      dbg.push('proxy=' + String(process.env.HTTPS_PROXY ?? process.env.https_proxy ?? process.env.HTTP_PROXY ?? process.env.http_proxy ?? '(unset)'))
+      page.on?.('requestfailed', (r: any) => { if (dbg.length < 20) dbg.push('reqfail=' + String(r.url()).slice(0, 70) + '::' + String(r.failure?.()?.errorText ?? '')) })
+      page.on?.('pageerror', (e: any) => { if (dbg.length < 20) dbg.push('pageerror=' + String(e?.message ?? e).slice(0, 90)) })
+      page.on?.('console', (m: any) => { if (m?.type?.() === 'error' && dbg.length < 20) dbg.push('consoleerr=' + String(m.text()).slice(0, 90)) })
+    }
+  } catch { /* 诊断失败不影响主流程 */ }
+  for (let a = 1; a <= attempts; a++) {
+    try {
+      await page.goto(`${baseUrl}/Default.aspx?pg=login.asp&username=`, { waitUntil: 'domcontentloaded', timeout: 60000 })
+    } catch (e) {
+      dbg.push('goto' + a + '=' + String(e).split('\n')[0])
+    }
+    let f = await waitForFrame(page, 12000)
+    if (!f || !f.url() || f.url().includes('about:blank')) {
+      const forced = await page.evaluate((u: string) => {
+        const fr: any = document.querySelector('iframe[name="content"]')
+        if (!fr) return 'no-iframe'
+        if (!fr.src || String(fr.src).includes('about:blank')) fr.src = u
+        return 'src-set'
+      }, `${baseUrl}/login.asp?username=`).catch((e: any) => 'eval-failed:' + String(e?.message ?? e))
+      dbg.push('try' + a + '=forceSrc:' + forced)
+      f = await waitForFrame(page, 25000)
+    }
+    const frames = page.frames().map((x: any) => (x.name() || '(main)') + ':' + (x.url() || '')).join(' , ')
+    if (dbg.length < 20) dbg.push('try' + a + '=' + (f ? f.url() : 'null') + ' frames[' + frames.slice(0, 260) + ']')
+    if (!f) continue
+    await f.waitForSelector("input[name='username']", { state: 'attached', timeout: 20000 }).catch(() => {})
+    await f.evaluate(() => {
+      const details = document.querySelector('#traditionalLoginCollapsible')
+      if (details) (details as any).open = true
+      const ud = document.querySelector('#userNamePasswordDiv')
+      if (ud) ud.classList.remove('hideElement')
+      const eb = document.querySelector('#emLoginButtonsDiv')
+      if (eb) eb.classList.remove('hideElement')
+    }).catch(() => {})
+    await f.waitForSelector("input[name='username']", { state: 'visible', timeout: 10000 }).catch(() => {})
+    const visible = await f.locator("input[name='username']").isVisible().catch(() => false)
+    if (visible) return f
+    dbg.push('try' + a + '=usernameVisible:false')
+    await page.waitForTimeout(1500)
+  }
+  return null
 }
 
 async function waitForMainMenu(page: any): Promise<any | null> {
@@ -437,24 +767,45 @@ async function scrapeEmJournal(j: JournalConfig, browserPath?: string): Promise<
     if (!frame) return { journal: j.name, system: 'editorial-manager', error: '登录失败或未等到主菜单 [' + dbg.join(' | ') + ']' }
 
     const { counts, links } = await scrapeMenu(frame)
-    // 分区清单：配置的分区优先（保序、尊重用户显式选择），再自动补充主菜单上其他「投稿分区」
-    // （count>0 且有链接；排除 New Submissions 发起入口 / with Production Completed 已完成历史）
-    // 决策历史分区（with a Decision）也纳入：kind='decision'，报告里只列最近 7 天决策的稿件
+    // 分区清单优先采用「自动识别」时 LLM 给出的组织结构：顺序、是否抓取、kind 都由它定
+    // （决策历史分区 kind=decision，报告里只列最近 7 天决策的稿件）。
+    // structure 缺失（模型当年失败或旧配置）时回落到原来的确定性逻辑：
+    // 配置里的 sections 保序优先，再按正则自动补充主菜单上的投稿分区。
+    const st: any = (j as any).structure
+    const stSections: { name: string; kind?: string; check?: boolean }[] = Array.isArray(st?.sections) ? st.sections : []
     const secNames: string[] = []
-    for (const sec of j.sections) if (sec && !secNames.includes(sec)) secNames.push(sec)
-    for (const key of Object.keys(links)) {
-      if (secNames.includes(key)) continue
-      const kt = key.toLowerCase()
-      if (!/(submission|revision|decision)/.test(kt)) continue
-      if (/new submission|with production completed/.test(kt)) continue
-      if ((counts[key] ?? 0) > 0 && links[key]) secNames.push(key)
+    const kindOf: Record<string, 'decision' | undefined> = {}
+    const autoAdd = () => {
+      for (const key of Object.keys(links)) {
+        if (secNames.includes(key)) continue
+        const kt = key.toLowerCase()
+        if (!/(submission|revision|decision)/.test(kt)) continue
+        if (/new submission|with production completed/.test(kt)) continue
+        if ((counts[key] ?? 0) > 0 && links[key]) {
+          secNames.push(key)
+          if (/with a decision/i.test(key)) kindOf[key] = 'decision'
+        }
+      }
+    }
+    if (stSections.length) {
+      // LLM 顺序；check=false 的不抓；主菜单上找不到的跳过（不猜 href）
+      for (const s of stSections) {
+        const nm = typeof s?.name === 'string' ? s.name : ''
+        if (!nm || s.check === false || !links[nm] || secNames.includes(nm)) continue
+        secNames.push(nm)
+        if (s.kind === 'decision') kindOf[nm] = 'decision'
+      }
+      autoAdd()
+    } else {
+      for (const sec of j.sections) if (sec && !secNames.includes(sec)) secNames.push(sec)
+      autoAdd()
     }
     const sections: SectionResult[] = []
     for (const secName of secNames) {
       const count = counts[secName] ?? 0
       const href = links[secName]
       const submissions: Submission[] = []
-      const kind: 'decision' | undefined = /with a decision/i.test(secName) ? 'decision' : undefined
+      const kind: 'decision' | undefined = kindOf[secName] ?? (/with a decision/i.test(secName) ? 'decision' : undefined)
       if (count > 0 && href) {
         await frame.goto(href, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {})
         // 决策历史可能跨页，遍历全部分页；普通活跃分区一页即可
@@ -468,7 +819,7 @@ async function scrapeEmJournal(j: JournalConfig, browserPath?: string): Promise<
       }
       sections.push({ name: secName, count, submissions, kind })
     }
-    return { journal: j.name, system: 'editorial-manager', sections }
+    return { journal: j.name, system: 'editorial-manager', sections, groups: Array.isArray(st?.groups) ? st.groups : [] } as any
   } catch (e) {
     return { journal: j.name, system: 'editorial-manager', error: String(e) }
   } finally {
@@ -542,9 +893,15 @@ function formatReport(results: JournalResult[], dateStr: string): string {
       continue
     }
     const sections = r.sections ?? []
+    // 报告分节：structure.groups 里每一组的第一个分区之前插入组标题
+    const groupsOf: { title: string; sections: string[] }[] = Array.isArray((r as any).groups) ? (r as any).groups : []
+    const groupOf = (n: string) => groupsOf.find((g) => Array.isArray(g.sections) && g.sections.includes(n))?.title ?? ''
+    let lastGroup = ''
     const secLines: string[] = []
     let hasContent = false
     for (const sec of sections) {
+      const gName = groupOf(sec.name)
+      if (gName && gName !== lastGroup) { secLines.push('### ' + gName); lastGroup = gName }
       const subs = sec.submissions ?? []
       // 决策历史分区：只列最近 7 天内的决策，独立分组，不计入活跃投稿
       if (sec.kind === 'decision') {
@@ -660,6 +1017,114 @@ function fallbackSessionTitle(session: any): string {
 }
 
 /** 列出当前 live 会话（sessionId + cwd + 标题），供设置面板选择汇报目标。 */
+/**
+ * 从设置命名空间重建 provider/模型列表：DSH 0.2 客户端已不再暴露 connection.api.llm.models。
+ * 命名空间名（如 llm-deepseek-account）不是 provider id，只有与 agent-default-model 一致的才用真实 id 标注，
+ * 其余不猜——错误 id 下发只会让「模型识别」静默失败。
+ */
+function buildModelGroupsPC(settingsService: any): any[] {
+  const out: any[] = []
+  const seen = new Set<string>()
+  const push = (id: string, name: string, models: any[]) => {
+    if (!id || seen.has(id) || !models.length) return
+    seen.add(id)
+    out.push({ id, name: name || id, models: models.map((m: any) => ({ id: m?.id ?? String(m), name: m?.name ?? m?.id ?? String(m) })) })
+  }
+  try {
+    let defProvider = ''
+    let defModel = ''
+    try {
+      const dm = settingsService?.get?.('agent-default-model')
+      defProvider = dm?.provider ?? ''
+      defModel = dm?.model ?? ''
+    } catch { /* 忽略 */ }
+    const rows = typeof settingsService?.describe === 'function' ? settingsService.describe() : []
+    for (const d of rows ?? []) {
+      const v = d?.value
+      if (!v || typeof v !== 'object') continue
+      const provs = v.providers
+      if (!provs || typeof provs !== 'object') continue
+      for (const k of Object.keys(provs)) {
+        const p = provs[k] ?? {}
+        push(k, p.name || k, Array.isArray(p.models) ? p.models : [])
+      }
+    }
+    for (const d of rows ?? []) {
+      const v = d?.value
+      if (!v || typeof v !== 'object') continue
+      if (v.providers && typeof v.providers === 'object') continue
+      if (!Array.isArray(v.models) || !v.models.length) continue
+      const ids = v.models.map((m: any) => m?.id ?? String(m))
+      if (defModel && defProvider && ids.includes(defModel)) push(defProvider, defProvider, v.models)
+      else if (!defModel) push(d.ns, d.ns, v.models)
+    }
+    if (defProvider) {
+      const i = out.findIndex((g) => g.id === defProvider)
+      if (i > 0) out.unshift(out.splice(i, 1)[0])
+    }
+  } catch { /* 静默 */ }
+  return out
+}
+
+/** 从会话索引读取 cwd（冷会话未载入，sessions.get() 给不出 cwd）。 */
+function cwdFromIndexPC(sessionId: string): string {
+  try {
+    const raw = String(sessionId || '')
+    const base = raw.startsWith('session-') ? raw : 'session-' + raw
+    const j2 = JSON.parse(readFileSync(join(homedir(), '.dsh', 'storages', 'session_projcache', 'sessions', base + '.json'), 'utf8'))
+    return j2?.record?.identity?.cwd ?? ''
+  } catch { return '' }
+}
+
+/**
+ * 列出全部会话：live 的来自 sessions 服务，其余来自 DSH 的会话索引
+ * （~/.dsh/storages/session_projcache/sessions），未打开的标注「（未打开）」。
+ * 索引里的 id 保留 'session-' 前缀，才能与 live 会话去重、并直接交给 ensureSession。
+ */
+function listAllSessionsPC(agents: any, sessions: any, sessionTitle: any): any[] {
+  const out: any[] = []
+  const seen = new Set<string>()
+  try {
+    for (const s of sessions.list() ?? []) {
+      let title = ''
+      try { title = sessionTitle?.get?.(s)?.title ?? fallbackSessionTitle(s) } catch { title = '' }
+      out.push({
+        sessionId: s.id,
+        cwd: s.header?.cwd ?? '',
+        title: (title && String(title).trim()) || '(未命名)',
+        running: agents?.get?.(s.id)?.status === 'running',
+        live: true,
+      })
+      seen.add(s.id)
+    }
+  } catch { /* 静默 */ }
+  try {
+    const dir = join(homedir(), '.dsh', 'storages', 'session_projcache', 'sessions')
+    const rows: any[] = []
+    for (const n of readdirSync(dir)) {
+      if (!/^session-.+\.json$/.test(n)) continue
+      const id = n.slice(0, -5)
+      if (seen.has(id)) continue
+      try {
+        const j3 = JSON.parse(readFileSync(join(dir, n), 'utf8'))
+        const r = j3?.record ?? {}
+        const t = r.rows?.title?.val
+        rows.push({
+          sessionId: id,
+          cwd: r.identity?.cwd ?? '',
+          title: ((typeof t === 'string' && t.trim()) ? t.trim() : '(未命名)') + '（未打开）',
+          running: false,
+          live: false,
+          at: r.identity?.createdAt ?? 0,
+        })
+      } catch { /* 跳过坏条目 */ }
+    }
+    rows.sort((a, b) => (b.at ?? 0) - (a.at ?? 0))
+    for (const r of rows) out.push(r)
+  } catch { /* 静默 */ }
+  return out
+}
+
 function listLiveSessions(agents: any, sessions: any, sessionTitle: any): any[] {
   const out: any[] = []
   try {
@@ -678,11 +1143,41 @@ function listLiveSessions(agents: any, sessions: any, sessionTitle: any): any[] 
 }
 
 /** 往指定 live 会话注入一条用户消息（报告），触发 agent 简短确认。返回 'ok' 或失败原因。 */
-function reportToSession(agents: any, sessionId: string, report: string): string {
+/**
+ * 往指定会话注入一条用户消息（报告）。会话未打开时用宿主 agents 服务的
+ * ensureSession(sessionId, cwd, checkPersistedIdentity) 按需载入（它返回 live agent），
+ * 所以目标会话不必提前打开。返回 'ok' 或失败原因。
+ */
+async function reportToSession(agents: any, sessions: any, sessionId: string, report: string): Promise<string> {
+  const __pcPre = await (async () => {
+    try {
+      const quick = (agents && typeof agents.get === "function") ? agents.get(sessionId) : null;
+      if (quick && typeof quick.followup === "function") return quick;
+      let cwd0 = "";
+      try { cwd0 = cwdFromIndexPC(sessionId) || ""; } catch (e: any) { cwd0 = ""; }
+      await __pcLoadSession(sessionId, cwd0);
+      const a0 = await __pcAwaitAgent(sessionId, 8000);
+      return a0;
+    } catch (e: any) { return null; }
+  })();
+  if (__pcPre && typeof __pcPre.followup === "function") {
+    try { __pcPre.followup(__pcBuildMsg(report)); return "ok"; } catch (e: any) { /* 落到原逻辑 */ }
+  }
   if (!sessionId) return '未配置汇报会话'
-  const agent = agents?.get?.(sessionId)
+  let agent = agents?.get?.(sessionId)
   if (!agent || typeof agent.followup !== 'function') {
-    return `会话 ${sessionId} 未打开（非 live），无法汇报到对话`
+    try {
+      if (typeof agents?.ensureSession === 'function') {
+        let cwd = ''
+        try { cwd = sessions?.get?.(sessionId)?.header?.cwd || '' } catch { cwd = '' }
+        if (!cwd) cwd = cwdFromIndexPC(sessionId)
+        agent = await agents.ensureSession(sessionId, cwd, true)
+      }
+    } catch { /* 落到下面的错误信息 */ }
+  }
+  if (!agent || typeof agent.followup !== 'function') agent = agents?.get?.(sessionId)
+  if (!agent || typeof agent.followup !== 'function') {
+    return `会话 ${sessionId} 无法载入（非 live，且 ensureSession 未成功）`
   }
   const message = createUserMessage({
     content: [{
@@ -750,29 +1245,82 @@ async function callLlmText(llmService: any, settingsService: any, prompt: string
 }
 
 /** 分析 EM 主菜单文本，识别期刊名 + 系统类型（分区由页面确定性探测提供，不依赖模型，避免漏/错）。 */
-async function analyzeJournalMenu(llmService: any, settingsService: any, baseUrl: string, bodyText: string, providerOverride?: string, modelOverride?: string): Promise<{ name?: string; sections?: string[]; system?: string; error?: string }> {
+/** LLM 识别出的主菜单组织结构（存进期刊配置的 structure 字段）。 */
+interface MenuStructure {
+  name: string
+  system: string
+  groups: { title: string; sections: string[] }[]
+  sections: { name: string; kind: string; check: boolean }[]
+}
+
+/**
+ * 让 LLM 识别整份主菜单的组织结构：刊名、系统类型、分区清单、分组、每个分区是否值得抓取。
+ * 定位：LLM 只做"挑选 + 分类 + 排序"，不做发明与计数——
+ *   · 分区名必须逐字来自真实抓到的链接名，本函数会再校验一次，编出来的名字一律丢弃；
+ *   · 计数一律使用页面确定性值，不信模型给的数字；
+ *   · 模型漏掉但页面确实存在的投稿分区，按旧的确定性规则补在末尾，避免丢分区。
+ */
+async function analyzeJournalMenu(llmService: any, settingsService: any, baseUrl: string, menu: { title?: string; bodyText?: string; counts?: Record<string, number>; links?: Record<string, string> }, providerOverride?: string, modelOverride?: string): Promise<{ structure?: MenuStructure; error?: string }> {
+  const counts = menu.counts ?? {}
+  const linkNames = Object.keys(menu.links ?? menu.counts ?? {})
+  const menuList = linkNames.map((n) => '- ' + n + (counts[n] !== undefined ? ' (' + counts[n] + ')' : '')).join('\n')
   const prompt = [
-    '你是学术期刊投稿系统配置助手。下面是某个 Editorial Manager 投稿网站登录后的作者主菜单文本。',
-    '请从中识别期刊名（英文全名，去掉页面里无关的品牌文案）。',
-    '系统类型固定为 editorial-manager。',
+    '你是学术期刊投稿系统配置助手。下面是某投稿系统登录后「作者主菜单」的全部链接名与菜单文本。',
+    '请识别：期刊名、系统类型，以及整个主菜单的组织结构（分区清单与分组），供后续每日检查程序直接使用。',
+    '',
+    '硬性要求：',
+    '1. sections[].name 必须逐字取自下面「链接名清单」中的某一项，不要改写、不要翻译、不要发明；',
+    '2. 只有“稿件列表类”分区才 check=true；发起新投稿的入口（如 New Submissions）、已完成/归档、任务分配类一律 check=false；',
+    '3. kind 取值：active（处理中）、revision（修改中）、decision（已决策历史）、entry（投稿入口）、archive（已完成归档）、other；',
+    '4. sections 按菜单阅读顺序排列；',
+    '5. groups[].sections 必须是 sections[].name 的子集，用于报告分节展示；',
+    '6. 只输出一个 JSON 对象，不要 markdown 代码块、不要多余说明。',
     '',
     '站点地址：' + baseUrl,
+    '页面标题：' + (menu.title || '(无)'),
+    '',
+    '链接名清单：',
+    menuList.slice(0, 4000),
     '',
     '菜单文本：',
-    bodyText.slice(0, 6000),
+    String(menu.bodyText ?? '').slice(0, 4000),
     '',
-    '只输出一个 JSON 对象（不要 markdown 代码块、不要多余说明），格式：',
-    '{"name":"期刊名","system":"editorial-manager"}',
+    'JSON 格式：',
+    '{"name":"期刊名","system":"editorial-manager","groups":[{"title":"分组名","sections":["分区名"]}],"sections":[{"name":"分区名","kind":"active","check":true}]}',
   ].join('\n')
   const text = await callLlmText(llmService, settingsService, prompt, providerOverride, modelOverride)
   const m = text.match(/\{[\s\S]*\}/)
   if (!m) return { error: '模型未返回有效 JSON: ' + text.slice(0, 200) }
   try {
     const obj = JSON.parse(m[0])
+    const allowed = new Set(linkNames)
+    const seen = new Set<string>()
+    const secs: { name: string; kind: string; check: boolean }[] = []
+    for (const s of Array.isArray(obj.sections) ? obj.sections : []) {
+      const nm = typeof s?.name === 'string' ? s.name.trim() : ''
+      if (!nm || !allowed.has(nm) || seen.has(nm)) continue
+      seen.add(nm)
+      secs.push({ name: nm, kind: typeof s?.kind === 'string' ? s.kind : 'other', check: s?.check !== false })
+    }
+    for (const nm of linkNames) {
+      if (seen.has(nm)) continue
+      const kt = nm.toLowerCase()
+      if (!/(submission|revision|decision)/.test(kt)) continue
+      if (/new submission|with production completed|task assignment/.test(kt)) continue
+      if ((counts[nm] ?? 0) <= 0) continue
+      seen.add(nm)
+      secs.push({ name: nm, kind: /with a decision/i.test(nm) ? 'decision' : 'active', check: true })
+    }
+    const groups = (Array.isArray(obj.groups) ? obj.groups : [])
+      .map((g: any) => ({ title: typeof g?.title === 'string' ? g.title : '', sections: (Array.isArray(g?.sections) ? g.sections : []).filter((x: any) => typeof x === 'string' && seen.has(x)) }))
+      .filter((g: any) => g.sections.length > 0)
     return {
-      name: typeof obj.name === 'string' ? obj.name : undefined,
-      sections: Array.isArray(obj.sections) ? obj.sections.filter((s: any) => typeof s === 'string') : [],
-      system: obj.system === 'other' ? 'other' : 'editorial-manager',
+      structure: {
+        name: typeof obj.name === 'string' ? obj.name.trim() : '',
+        system: typeof obj.system === 'string' ? obj.system.trim() : '',
+        groups,
+        sections: secs,
+      },
     }
   } catch (e) {
     return { error: 'JSON 解析失败: ' + String(e) + ' | ' + text.slice(0, 200) }
@@ -812,7 +1360,15 @@ export function apply(ctx: AppContext, config: Config): void {
         if (req.method === 'GET' && p === '/config') {
           if (!settingsService?.describe) return send(500, { ok: false, error: 'settings 服务不可用' })
           const desc = settingsService.describe().find((d: any) => d.ns === 'paper-checker')
-          return send(200, { ok: true, config: desc?.value ?? getConfig(), revision: desc?.revision ?? 0 })
+          return send(200, {
+            ok: true,
+            config: desc?.value ?? getConfig(),
+            revision: desc?.revision ?? 0,
+            // 面板要的会话列表与 provider/模型列表统一随 /config 下发：客户端在 0.2 拿不到
+            // llm.models，/sessions 路径在渲染进程里也会静默失败。
+            sessions: (() => { try { return listAllSessionsPC(ctx.agents, ctx.sessions, sessionTitleService) } catch { return [] } })(),
+            modelGroups: (() => { try { return buildModelGroupsPC(settingsService) } catch { return [] } })(),
+          })
         }
         if (req.method === 'GET' && p === '/sessions') {
           return send(200, { ok: true, sessions: listLiveSessions(ctx.agents, ctx.sessions, sessionTitleService) })
@@ -822,14 +1378,33 @@ export function apply(ctx: AppContext, config: Config): void {
           const value = body?.config
           const expectedRevision = body?.expectedRevision
           if (!settingsService?.mutate) return send(500, { ok: false, error: 'settings 服务不可用' })
-          await settingsService.mutate('paper-checker', [{ op: 'set', path: [], value }], expectedRevision)
+          // DSH 的 mutate 是**字段级编辑**（docs: ordered form edits）——单个根 op（path: []）会被静默丢弃，
+          // 表现为"返回 ok、revision 递增、值不变"。这里改为逐字段 op。
+          const opsPC = Object.keys(value ?? {}).map((k: string) => ({ op: 'set', path: [k], value: (value as any)[k] }))
+          await settingsService.mutate('paper-checker', opsPC.length ? opsPC : [{ op: 'set', path: [], value }], expectedRevision)
           const desc = settingsService.describe().find((d: any) => d.ns === 'paper-checker')
-          return send(200, { ok: true, revision: desc?.revision ?? 0 })
+          // 写后回读校验：DSH 的写入是字段级 volatile 判定，非 volatile 字段会被静默丢弃。
+          // 这里逐字段比对（journals 因 schema 会补默认值而跳过深比），不一致就报错，避免"假成功"。
+          const afterValue: any = (desc?.value ?? {}) as any
+          const notWritten: string[] = []
+          for (const k of Object.keys(value ?? {})) {
+            if (k === 'journals') continue
+            if (JSON.stringify(afterValue?.[k] ?? null) !== JSON.stringify((value as any)[k] ?? null)) notWritten.push(k)
+          }
+          if (notWritten.length) return send(200, { ok: false, revision: desc?.revision ?? 0, error: '保存未生效（这些字段没有写入）: ' + notWritten.join(', ') })
+          return send(200, { ok: true, revision: desc?.revision ?? 0, verified: true })
         }
         if (req.method === 'POST' && p === '/run') {
-          const results = await runCheck(getConfig())
+          const cfgRun = getConfig()
+          const results = await runCheck(cfgRun)
           const dateStr = new Date().toISOString().slice(0, 10)
-          return send(200, { ok: true, report: formatReport(results, dateStr) })
+          const reportRun = formatReport(results, dateStr)
+          // 立即检查同样汇报到对话（原先只有定时检查会汇报）
+          let deliver = ''
+          if (cfgRun.reportSessionId) {
+            try { deliver = await reportToSession(ctx.agents, ctx.sessions, cfgRun.reportSessionId, reportRun) } catch (e) { deliver = '汇报异常: ' + String(e) }
+          }
+          return send(200, { ok: true, report: reportRun, deliver })
         }
         if (req.method === 'POST' && p === '/report') {
           const cfg = getConfig()
@@ -840,12 +1415,36 @@ export function apply(ctx: AppContext, config: Config): void {
             const results = await runCheck(cfg)
             report = formatReport(results, new Date().toISOString().slice(0, 10))
           }
-          const r = reportToSession(ctx.agents, cfg.reportSessionId, report)
+          const r = await reportToSession(ctx.agents, ctx.sessions, cfg.reportSessionId, report)
           return send(200, { ok: true, result: r })
+        }
+        // 只检查一条期刊（面板「检查这一本」用）：不影响整轮检查，便于逐条排障。
+        if (req.method === 'POST' && p === '/run-one') {
+          const body = JSON.parse(await readBody(req))
+          const one = body?.journal
+          if (!one || typeof one !== 'object' || !one.baseUrl) return send(400, { ok: false, error: '缺少 journal.baseUrl' })
+          const cfgOne = getConfig()
+          const jOne: any = {
+            name: String(one.name ?? '') || new URL(String(one.baseUrl)).hostname,
+            baseUrl: String(one.baseUrl).replace(/\/+$/, '').replace(/\/default\.aspx$/i, '').replace(/\/+$/, ''),
+            username: String(one.username ?? ''),
+            password: String(one.password ?? ''),
+            sections: Array.isArray(one.sections) ? one.sections : [],
+            system: one.system === 'other' ? 'other' : 'editorial-manager',
+            structure: one.structure,
+          }
+          const dateOne = new Date().toISOString().slice(0, 10)
+          const rOne: any = jOne.system === 'other' ? { journal: jOne.name, system: 'other' } : await scrapeEmJournal(jOne, cfgOne.browserPath)
+          const reportOne = formatReport([rOne], dateOne)
+          let deliverOne = ''
+          if (cfgOne.reportSessionId) {
+            try { deliverOne = await reportToSession(ctx.agents, ctx.sessions, cfgOne.reportSessionId, reportOne) } catch (e) { deliverOne = '汇报异常: ' + String(e) }
+          }
+          return send(200, { ok: true, report: reportOne, single: true, deliver: deliverOne })
         }
         if (req.method === 'POST' && p === '/discover') {
           const body = JSON.parse(await readBody(req))
-          const baseUrl = String(body?.baseUrl ?? '').trim().replace(/\/+$/, '')
+          const baseUrl = String(body?.baseUrl ?? '').trim().replace(/\/+$/, '').replace(/\/default\.aspx$/i, '').replace(/\/+$/, '')
           const username = String(body?.username ?? '').trim()
           const password = String(body?.password ?? '')
           if (!baseUrl || !username || !password) return send(400, { ok: false, error: '网址/账号/密码不能为空' })
@@ -855,19 +1454,25 @@ export function apply(ctx: AppContext, config: Config): void {
           // 这就是「网站有哪些分区」的结构——保存后每次检查时配置优先抓取，
           // count=0 的分区自动跳过，将来一有稿件（count>0）即被抓取，无需再手动维护。
           // 排除 with Production Completed（已完成历史归档）与 Task Assignments（EM 任务功能区，非投稿分区）。
-          const sections = Object.keys(menu.counts).filter((k) => !/with production completed|task assignment/i.test(k))
-          // 期刊名以页面标题（确定性）优先，模型识别仅在标题缺失/过泛时兜底（模型可能把页面无关文案当刊名）
+          // 交给 LLM 识别整份主菜单的组织结构（分区清单 / 分组 / 是否抓取 / kind）。
+          // 确定性探测仍然负责两件事：给出"真实存在的链接名"白名单、以及页面上的计数。
+          const cfgNow = getConfig()
+          const parsed = await analyzeJournalMenu(ctx.llm, settingsService, baseUrl, menu, cfgNow.discoverProvider, cfgNow.discoverModel)
+          const st = parsed.structure
+          const detSections = Object.keys(menu.counts).filter((k) => !/with production completed|task assignment/i.test(k))
+          // 分区顺序：完全按 LLM 给出的顺序；模型失败则回落到旧的确定性顺序
+          const sections = st ? st.sections.filter((s) => s.check).map((s) => s.name) : detSections
           let name = menu.title?.trim() || ''
           const titleGeneric = !name || name.length < 3 || /editorial manager|author main menu|main menu|welcome/i.test(name)
-          let system = 'editorial-manager'
-          const cfgNow = getConfig()
-          const parsed = await analyzeJournalMenu(ctx.llm, settingsService, baseUrl, menu.bodyText || menu.title, cfgNow.discoverProvider, cfgNow.discoverModel)
-          if (!parsed.error) {
-            if (parsed.system) system = parsed.system
-            if (titleGeneric && parsed.name?.trim()) name = parsed.name.trim()
-          }
+          if (titleGeneric && st?.name) name = st.name
           if (!name) name = new URL(baseUrl).hostname.replace(/^www\./, '').replace(/\.editorialmanager\.com$/, '')
-          return send(200, { ok: true, config: { name, baseUrl, username, password, sections, system }, llmError: parsed.error })
+          // 本次登录走的是 EM 流程，运行路径仍是 editorial-manager；模型判定的系统类型记录在
+          // structure.system 里，供将来接入别的投稿系统时使用。
+          const system = 'editorial-manager'
+          const structure = st
+            ? { source: 'llm', model: cfgNow.discoverModel || '', capturedAt: new Date().toISOString(), name: st.name, system: st.system, groups: st.groups, sections: st.sections }
+            : { source: '', model: '', capturedAt: '', name: '', system: '', groups: [], sections: [] }
+          return send(200, { ok: true, config: { name, baseUrl, username, sections, system, structure }, llmError: parsed.error })
         }
         return send(404, { ok: false, error: 'not found: ' + p })
       } catch (e: any) {
@@ -923,7 +1528,7 @@ export function apply(ctx: AppContext, config: Config): void {
           log(dir, '微信推送: ' + (ok ? '成功' : '失败'))
         }
         if (cfg.reportSessionId) {
-          const r = reportToSession(ctx.agents, cfg.reportSessionId, report)
+          const r = await reportToSession(ctx.agents, ctx.sessions, cfg.reportSessionId, report)
           log(dir, '对话汇报: ' + r)
         }
         log(dir, '定时检查完成')

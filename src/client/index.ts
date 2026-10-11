@@ -1,6 +1,6 @@
 /**
- * @dsh-external/dsh-paper-checker — client 设置面板（settings.section）。
- * 在 DSH「设置」里注册「投稿检查」区块，可视化编辑定时配置 + 期刊列表。
+ * @dsh-external/dsh-paper-checker — client 配置面板（plugins.bundle.config）。
+ * 注册在侧栏「插件」页里本 bundle 的详情页上（描述与行列表之间），可视化编辑定时配置 + 期刊列表。
  * 配置读写走插件自建 HTTP API（/paper-checker/api），绕过 apiproxy 的 settings 白名单。
  */
 import * as React from 'react'
@@ -41,13 +41,20 @@ function PaperCheckerPanel(props: any): any {
   const [modelGroups, setModelGroups] = React.useState<any[]>([])
 
   const loadSessions = React.useCallback(() => {
-    fetchJson('/sessions').then((res: any) => {
-      if (res.ok) setSessions(res.sessions || [])
+    // 服务端把会话列表搭在 /config 上返回（/sessions 在渲染进程里会静默失败）
+    fetchJson('/config').then((res: any) => {
+      if (res && res.ok && Array.isArray(res.sessions)) setSessions(res.sessions)
     }).catch(() => {})
   }, [])
 
   const loadProviders = React.useCallback(() => {
-    if (!api?.llm?.models) return
+    // DSH 0.2 不再暴露 connection.api.llm.models；服务端把 provider/模型列表搭在 /config 上
+    if (!api?.llm?.models) {
+      fetchJson('/config').then((res: any) => {
+        if (res && res.ok && Array.isArray(res.modelGroups)) setModelGroups(res.modelGroups)
+      }).catch(() => {})
+      return
+    }
     api.llm.models({}).then((res: any) => {
       const groups = res?.result?.value?.groups || []
       setModelGroups(groups.map((g: any) => ({
@@ -103,7 +110,7 @@ function PaperCheckerPanel(props: any): any {
     setRunning(true); setReport(''); setMsg('')
     try {
       const res = await fetchJson('/run', { method: 'POST' })
-      if (res.ok) setReport(res.report ?? '(无报告)')
+      if (res.ok) setReport((res.report ?? '(无报告)') + (res.deliver ? '\n\n—— 对话汇报: ' + res.deliver : ''))
       else setMsg('检查失败: ' + (res.error ?? ''))
     } catch (e) {
       setMsg('检查异常: ' + String(e))
@@ -121,7 +128,8 @@ function PaperCheckerPanel(props: any): any {
         body: JSON.stringify({ baseUrl: dUrl.trim(), username: dUser.trim(), password: dPass }),
       })
       if (res.ok) {
-        setDiscovered(res.config)
+        // 服务端不再回显密码，这里用面板自己的输入补齐，保证「加入列表」写进配置的凭据完整。
+        setDiscovered({ ...(res.config || {}), username: dUser.trim(), password: dPass })
         setDiscoveredName(res.config?.name || '')
         setDiscoverMsg(res.llmError ? '（模型识别失败，已用页面信息回退）确认无误后点「加入列表」' : '识别成功，确认无误后点「加入列表」')
       } else {
@@ -148,6 +156,50 @@ function PaperCheckerPanel(props: any): any {
     setDiscoverMsg('已加入列表，记得点「保存」')
   }
 
+  // ---- 已添加期刊列表：从 journalsText 派生，逐条删除（两段式确认）----
+  const [confirmDel, setConfirmDel] = React.useState<number>(-1)
+  const journalItems: any[] = (() => {
+    try { const a = JSON.parse(journalsText); return Array.isArray(a) ? a : [] } catch { return [] }
+  })()
+  const journalsInvalid = (() => { if (journalsText.trim() === '') return false; try { return !Array.isArray(JSON.parse(journalsText)) } catch { return true } })()
+  const removeJournal = (idx: number) => {
+    const next = journalItems.slice()
+    const removed = next[idx]
+    next.splice(idx, 1)
+    setJournalsText(JSON.stringify(next, null, 2))
+    setConfirmDel(-1)
+    setMsg('已移除「' + String(removed?.name ?? '') + '」，点「保存」生效')
+  }
+
+  // ---- 顺序调整 / 清空 / 单独检查一本 ----
+  const [confirmClear, setConfirmClear] = React.useState<boolean>(false)
+  const [runningOne, setRunningOne] = React.useState<number>(-1)
+  const clearJournals = () => {
+    setJournalsText('[]')
+    setConfirmClear(false)
+    setMsg('已清空期刊列表，点「保存」生效')
+  }
+  const moveJournal = (idx: number, dir: number) => {
+    const next = journalItems.slice()
+    const to = idx + dir
+    if (to < 0 || to >= next.length) return
+    const tmp = next[idx]
+    next[idx] = next[to]
+    next[to] = tmp
+    setJournalsText(JSON.stringify(next, null, 2))
+    setConfirmDel(-1)
+    setMsg('已' + (dir < 0 ? '上移' : '下移') + '，点「保存」生效')
+  }
+  const checkOne = async (idx: number) => {
+    const one = journalItems[idx]
+    if (!one || !one.baseUrl) { setMsg('该条目缺少 baseUrl，无法单独检查'); return }
+    setRunningOne(idx); setMsg(''); setReport('')
+    try {
+      const res = await fetchJson('/run-one', { method: 'POST', body: JSON.stringify({ journal: one }) })
+      if (res.ok) { setReport((res.report ?? '(无报告)') + (res.deliver ? '\n\n—— 对话汇报: ' + res.deliver : '')); setMsg('已单独检查「' + String(one.name ?? '') + '」') }
+      else setMsg('单独检查失败: ' + (res.error ?? ''))
+    } catch (e) { setMsg('单独检查异常: ' + String(e)) } finally { setRunningOne(-1) }
+  }
   const s = {
     label: { display: 'block', marginBottom: 4, fontSize: 12, color: 'var(--dsw-alias-label-secondary, #888)' },
     input: { width: '100%', boxSizing: 'border-box', padding: '6px 8px', borderRadius: 8, border: '1px solid var(--dsw-alias-border-l1, #ccc)', background: 'transparent', color: 'inherit' },
@@ -254,6 +306,50 @@ function PaperCheckerPanel(props: any): any {
       ) : null,
       React.createElement('div', { style: s.hint }, '自动打开期刊网站登录，探测主菜单上的全部投稿分区（含当前 0 篇的分区）并识别期刊名，生成后加入下方期刊列表；保存后每次检查会按探测结果自动抓取各分区（出现新稿件即被抓到），无需手动维护分区。'),
     ),
+    React.createElement('div', { style: { ...s.row, border: '1px solid var(--dsw-alias-border-l1, #ccc)', borderRadius: 8, padding: 10 } },
+      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+        React.createElement('label', { style: { ...s.label, marginBottom: 0, flex: 1 } }, '已添加期刊（' + journalItems.length + ' 条）'),
+        confirmClear
+          ? React.createElement('span', { style: { display: 'flex', gap: 4 } },
+              React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', onClick: clearJournals }, '确认清空'),
+              React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', onClick: () => setConfirmClear(false) }, '取消'),
+            )
+          : React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', disabled: journalItems.length === 0, onClick: () => setConfirmClear(true) }, '清空全部'),
+      ),
+      journalsInvalid
+        ? React.createElement('div', { style: s.hint }, '下方 JSON 当前不是合法数组，无法列出条目。')
+        : (journalItems.length === 0
+          ? React.createElement('div', { style: s.hint }, '（暂无期刊。用上面的「新增期刊」识别，或直接编辑下方 JSON。）')
+          : React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+              ...journalItems.map((j2: any, i: number) =>
+                React.createElement('div', {
+                  key: String(j2?.baseUrl ?? '') + '#' + i,
+                  style: { display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, border: '1px dashed var(--dsw-alias-border-l1, #ccc)' },
+                },
+                  React.createElement('div', { style: { flex: 1, minWidth: 0 } },
+                    React.createElement('div', { style: { fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                      (j2?.name || '(未命名)') + (j2?.system === 'other' ? ' · AI 回退' : ' · 确定性抓取')),
+                    React.createElement('div', { style: { ...s.hint, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                      String(j2?.baseUrl ?? '') +
+                        ' · 分区 ' + (Array.isArray(j2?.sections) ? j2.sections.length : 0) + ' 个' +
+                        (j2?.structure && Array.isArray(j2.structure.sections) && j2.structure.sections.length ? ' · 结构 ' + j2.structure.sections.length + ' 项' : '')),
+                  ),
+                  confirmDel === i
+                    ? React.createElement('span', { style: { display: 'flex', gap: 4 } },
+                        React.createElement('button', { style: { ...s.btn, padding: '4px 10px' }, type: 'button', onClick: () => removeJournal(i) }, '确认删除'),
+                        React.createElement('button', { style: { ...s.btn, padding: '4px 10px' }, type: 'button', onClick: () => setConfirmDel(-1) }, '取消'),
+                      )
+                    : React.createElement('span', { style: { display: 'flex', gap: 4 } },
+                        React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', title: '上移', disabled: i === 0, onClick: () => moveJournal(i, -1) }, '↑'),
+                        React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', title: '下移', disabled: i === journalItems.length - 1, onClick: () => moveJournal(i, 1) }, '↓'),
+                        React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', disabled: runningOne === i, onClick: () => checkOne(i) }, runningOne === i ? '检查中…' : '检查这一本'),
+                        React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', onClick: () => setConfirmDel(i) }, '删除'),
+                      ),
+                ),
+              ),
+            )),
+      React.createElement('div', { style: s.hint }, '删除只改这份编辑内容，点下方「保存」后才写入配置。'),
+    ),
     React.createElement('div', { style: s.row },
       React.createElement('label', { style: s.label }, '期刊列表（JSON 数组）'),
       React.createElement('textarea', {
@@ -277,10 +373,11 @@ function PaperCheckerPanel(props: any): any {
 
 export function apply(ctx: ClientContext): void {
   const api = ctx.get('connection')?.api
-  ctx.effect(() => ctx.slots.inject('settings.section', () => ctx.slots.register({
-    name: 'settings.section',
-    id: 'paper-checker',
-    order: 50,
-    label: () => '投稿检查插件',
-  }, (props: any) => React.createElement(PaperCheckerPanel, { ...props, api }))), 'paper-checker: settings section')
+  // 配置界面挂在侧栏「插件」页里本 bundle 的详情页上，而不是设置里：
+  // plugins.bundle.config 按 bundle 的 npm 包名索引，页面在描述与行列表之间渲染它。
+  // 页面自己画标题/图标/面包屑；注册随 bundle 的开关存在，bundle 关掉时自然消失。
+  ctx.effect(() => ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+    name: 'plugins.bundle.config',
+    key: '@dsh-external/dsh-paper-checker',
+  }, (props: any) => (props?.view === 'summary' ? null : React.createElement(PaperCheckerPanel, { ...props, api })))), 'paper-checker: bundle config')
 }
