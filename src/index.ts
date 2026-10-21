@@ -1965,6 +1965,8 @@ function formatReport(results: JournalResult[], dateStr: string, endedMonths: nu
   const lines: string[] = [`📊 每日投稿状态报告 (${dateStr})`, '']
   let total = 0
   let decisionTotal = 0
+  // [patch 2026-10-22u] 已结束投稿总数（不计入活跃投稿）
+  let endedTotal = 0
   const stageCounts: Record<Stage, number> = { submission: 0, revision: 0, production: 0 }
   const today = new Date()
   for (const r of results) {
@@ -1984,6 +1986,17 @@ function formatReport(results: JournalResult[], dateStr: string, endedMonths: nu
     const groupOf = (n: string) => groupsOf.find((g) => Array.isArray(g.sections) && g.sections.includes(n))?.title ?? ''
     let lastGroup = ''
     const secLines: string[] = []
+    // [patch 2026-10-22u] 已结束投稿统一收集到这里，最后作为「已结束」小节输出
+    const endedLines: string[] = []
+    // [patch 2026-10-22v] 同一稿件可能同时出现在活跃分区与决策分区，按编号去重
+    const endedSeen = new Set<string>()
+    const pushEnded = (num: string | undefined, line: string): void => {
+      const k = String(num ?? '')
+      if (k && endedSeen.has(k)) return
+      if (k) endedSeen.add(k)
+      endedLines.push(line)
+      endedTotal++
+    }
     let hasContent = false
     for (const sec of sections) {
       const gName = groupOf(sec.name)
@@ -1994,12 +2007,11 @@ function formatReport(results: JournalResult[], dateStr: string, endedMonths: nu
         const recent = recentDecisions(subs, today, endMonths)
         if (recent.length === 0) continue
         hasContent = true
-        decisionTotal += recent.length
-        secLines.push(`- 📂 已结束（最近 ${endMonths} 个月）`)
+        // [patch 2026-10-22u] 决策分区的条目并入统一「已结束」小节
         for (const s of recent) {
           const parts: string[] = []
           if (s.statusDate) parts.push(`决策 ${s.statusDate}`)
-          secLines.push(`  - [${zh(s.status)}] ${s.number}: ${s.title}${parts.length ? '（' + parts.join('，') + '）' : ''}`)
+          pushEnded(s.number, `  - [${zh(s.status)}] ${s.number}: ${s.title}${parts.length ? '（' + parts.join('，') + '）' : ''}`)
         }
         continue
       }
@@ -2010,8 +2022,16 @@ function formatReport(results: JournalResult[], dateStr: string, endedMonths: nu
       hasContent = true
       secLines.push(`- 📂 ${sec.name}（${sec.count}）`)
       for (const s of subs) {
-        // [patch 2026-10-22t] 已结束且超出追溯窗口的稿件不再列出
-        if (pcIsEndedStatus(s.status) && !pcWithinMonths(today, s.statusDate, endMonths)) continue
+        // [patch 2026-10-22u] 已结束（接受/拒稿/发表…）不算活跃投稿：窗口内的收进「已结束」小节
+        if (pcIsEndedStatus(s.status)) {
+          if (pcWithinMonths(today, s.statusDate, endMonths)) {
+            const eparts: string[] = []
+            if (s.submitted) eparts.push(`投稿 ${s.submitted}`)
+            if (s.statusDate) eparts.push(`更新 ${s.statusDate}`)
+            pushEnded(s.number, `  - [${zh(s.status)}] ${s.number}: ${s.title}${eparts.length ? '（' + eparts.join('，') + '）' : ''}`)
+          }
+          continue
+        }
         const stage = stageOf(sec.name, s.status)
         stageCounts[stage]++
         total++
@@ -2021,6 +2041,12 @@ function formatReport(results: JournalResult[], dateStr: string, endedMonths: nu
         if (s.revDue) parts.push(`截止 ${s.revDue}`)
         secLines.push(`  - [${zh(s.status)}] ${s.number}: ${s.title}${parts.length ? '（' + parts.join('，') + '）' : ''}`)
       }
+    }
+    // [patch 2026-10-22u] 「已结束」小节（接受/拒稿/发表等，不计入活跃投稿）
+    if (endedLines.length) {
+      hasContent = true
+      secLines.push(`- 📂 已结束（最近 ${endMonths} 个月）`)
+      for (const line of endedLines) secLines.push(line)
     }
     if (!hasContent) {
       lines.push('- 无活跃投稿（所有分区计数均为 0）。')
@@ -2034,7 +2060,7 @@ function formatReport(results: JournalResult[], dateStr: string, endedMonths: nu
     .filter((k) => stageCounts[k] > 0)
     .map((k) => `${STAGE_ZH[k]} ${stageCounts[k]} 篇`)
   let summary = `**摘要:** 共 ${total} 篇活跃投稿${stageSummary.length ? '（' + stageSummary.join(' · ') + '）' : ''}`
-  if (decisionTotal > 0) summary += ` · 近期决策 ${decisionTotal} 篇`
+  if (endedTotal > 0) summary += ` · 已结束 ${endedTotal} 篇`
   lines.push(summary + '。')
   return lines.join('\n')
 }
