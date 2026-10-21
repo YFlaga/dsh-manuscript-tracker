@@ -826,138 +826,220 @@ let __pcLoginOnceBusy = false
  *  登录态（cookie）随 profile 落盘，之后的无头抓取直接复用。 */
 async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ctxAny: any, finalUrl: string) => Promise<any>): Promise<{
   ok: boolean; finalUrl?: string; waitedMs?: number; error?: string; profileDir?: string; structure?: any
-  /** [local patch 2026-10-22] 登录窗口里所有页面（url/title），用来告诉用户"你登录的其实是统一身份门户" */
-  pages?: Array<{ url: string; title: string }>
-  /** 轮询期间顺手记录的账号密码（cookie 过期时用来重新登录；ORCID/SSO 登录拿不到） */
+  /** [local patch 2026-10-22] 登录窗口里所有页面轨迹（at=第几秒 / url / title） */
+  pages?: Array<{ at?: number; url: string; title: string }>
+  /** 识别出的稿件列表入口（plan.listUrl） */
+  planAt?: string
+  /** 是否是用户手动关掉浏览器结束的 */
+  closedByUser?: boolean
+  /** 轮询期间顺手记录的账号密码（cookie 过期时重新登录用） */
   creds?: { username: string; password: string }
 }> {
-  const { chromium } = pwRequire('playwright-core')
-  const startedAt = Date.now()
-  const release = await pcAcquireBrowser()
-  let ctx: any = null
-  const launchErr: string[] = []
-  try {
-    const dir = pcProfileDir()
-    for (const exe of pcHeadedExeCandidates(browserPath)) {
-      const opts: any = { headless: false, viewport: { width: 1280, height: 860 }, locale: 'en-US' }
-      if (exe) opts.executablePath = exe
-      try {
-        ctx = await chromium.launchPersistentContext(dir, opts)
-        break
-      } catch (e) {
-        launchErr.push((exe ? 'exe=' + exe + ' ' : 'default ') + String(e).split('\n')[0].slice(0, 200))
-        if (/singleton|in use|already (running|open)|lock|EBUSY|EPERM/i.test(String(e))) {
-          pcClearSingleton(dir)
-          await new Promise((r) => setTimeout(r, 1200))
-        }
-      }
-    }
-    if (!ctx) {
-      return { ok: false, waitedMs: Date.now() - startedAt, error: '有头浏览器启动失败（没有可用的完整 Chromium）： ' + launchErr.join(' | ').slice(0, 500) }
-    }
-    const page = (ctx.pages?.() ?? [])[0] ?? (await ctx.newPage())
-    let startHost = ''
-    try { startHost = new URL(baseUrl).hostname.toLowerCase() } catch { /* 静默 */ }
-    await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => { /* 静默 */ })
-    // 每 1s 轮询 context 内所有 page（ORCID 登录常在新标签页里完成）
-    let okUrl = ''
-    let stable = 0
-    let lastUrl = String(page.url?.() ?? '')
-    // [modified] 每轮顺手记下用户正在输入的账号密码（登录表单还在页面上时取 value；提交后页面跳走就没了）
-    let __pcCreds: { username: string; password: string } | null = null
-    while (Date.now() - startedAt < PC_LOGIN_TIMEOUT_MS) {
-      await new Promise((r) => setTimeout(r, 1000))
-      for (const pg of (ctx.pages?.() ?? [])) {
-        for (const fr of (pg.frames?.() ?? [])) {
-          try {
-            const got = await fr.evaluate(() => {
-              const pws: any[] = Array.from(document.querySelectorAll('input[type=password]')) as any[]
-              const pw: any = pws.find((i: any) => String(i.value || '').length > 0)
-              if (!pw) return null
-              const form: any = (pw as any).form || (pw as any).closest?.('form') || document
-              const cands = Array.from(form.querySelectorAll('input')).filter((i: any) => {
-                const ty = String(i.type || '').toLowerCase()
-                if (ty !== 'text' && ty !== 'email' && ty !== '') return false
-                return i !== pw && String(i.value || '').length > 0
-              })
-              const u: any = cands.find((i: any) => /user|email|login|account|name|id/i.test(String(i.name || '') + String(i.id || '') + String(i.placeholder || ''))) || cands[0]
-              return { username: String(u?.value || ''), password: String(pw.value || '') }
-            })
-            if (got && got.password) __pcCreds = { username: got.username, password: got.password }
-          } catch { /* 跨域 iframe / 页面已跳转：静默 */ }
-        }
-      }
-      let hit = ''
-      for (const pg of (ctx.pages?.() ?? [])) {
-        const u = String(pg.url?.() ?? '')
-        if (u) lastUrl = u
-        const sig = await pcLoggedInSignal(pg, startHost)
-        if (sig.ok) { hit = sig.url; break }
-      }
-      if (!hit) { okUrl = ''; stable = 0; continue }
-      if (hit === okUrl) stable += 1
-      else { okUrl = hit; stable = 1 }
-      if (stable >= 2) break // 连续 2 次（间隔 ~2s）停在同一个业务页 = 认为登录稳定
-    }
-    if (okUrl) {
-      // [local patch 2026-10-22] 把登录窗口里所有页面报回面板（用户常把统一身份门户当投稿系统）
-      const __pages: Array<{ url: string; title: string }> = []
-      for (const pg of ctx.pages?.() ?? []) {
-        try {
-          const u = String(pg.url?.() ?? '')
-          let t = ''
-          try {
-            t = String(await Promise.race([pg.title(), new Promise((r) => setTimeout(() => r(''), 1500))]) ?? '')
-          } catch {}
-          if (u) __pages.push({ url: u, title: t.slice(0, 120) })
-        } catch {}
-      }
-      // 第二步：登录成功后、关窗口之前先做结构识别（复用刚拿到的登录态，不用二次登录）。
-      let structure: any
-      if (onLoggedIn) {
-        try { structure = await onLoggedIn(ctx, okUrl) } catch (e) { structure = { error: String(e) } }
-        // [local patch 2026-10-22] 识别失败时先别关窗口：给用户最多 2 分钟在同一个登录态里打开「我的稿件 / 作者中心」
-        if (structure && structure.error && !structure.plan) {
-          const __deadline = Date.now() + 120000
-          const __seen = new Set((ctx.pages?.() ?? []).map((pg: any) => String(pg.url?.() ?? '')))
-          let __got: any = null
-          while (Date.now() < __deadline) {
-            await new Promise((r) => setTimeout(r, 3000))
-            const __fresh: string[] = []
-            for (const pg of ctx.pages?.() ?? []) {
-              const u = String(pg.url?.() ?? '')
-              if (u && !__seen.has(u)) __fresh.push(u)
-            }
-            if (!__fresh.length) continue
-            for (const u of __fresh) __seen.add(u)
-            for (const u of __fresh) {
-              try {
-                const again = await onLoggedIn(ctx, u)
-                if (again && !again.error && again.plan) { __got = again; break }
-              } catch {}
-            }
-            if (__got) break
-          }
-          if (__got) structure = __got
-          else structure.error += '（窗口多等了 2 分钟仍没识别到稿件列表：如果你在里面打开了「我的稿件」页，请把那个网址填到上面再点一次登录一次）'
-        }
-      }
-      return { ok: true, finalUrl: okUrl, waitedMs: Date.now() - startedAt, profileDir: dir, structure, pages: __pages, creds: __pcCreds ?? undefined }
-    }
-    return {
-      ok: false,
-      finalUrl: lastUrl,
-      waitedMs: Date.now() - startedAt,
-      error: '等了 ' + Math.round(PC_LOGIN_TIMEOUT_MS / 60000) + ' 分钟仍未检测到登录成功（登录态可能已存进 profile，可再点一次试试）',
-      profileDir: dir,
-    }
-  } catch (e) {
-    return { ok: false, waitedMs: Date.now() - startedAt, error: String(e) }
-  } finally {
-    try { await ctx?.close?.() } catch { /* 静默 */ }
-    release()
-  }
+	const { chromium } = pwRequire("playwright-core");
+	const startedAt = Date.now();
+	const release = await pcAcquireBrowser();
+	let ctx: any = null;
+	const launchErr = [];
+	try {
+		const dir = pcProfileDir();
+		for (const exe of pcHeadedExeCandidates(browserPath)) {
+			const opts: any = {
+				headless: false,
+				viewport: {
+					width: 1280,
+					height: 860
+				},
+				locale: "en-US"
+			};
+			if (exe) opts.executablePath = exe;
+			try {
+				ctx = await chromium.launchPersistentContext(dir, opts);
+				break;
+			} catch (e) {
+				launchErr.push((exe ? "exe=" + exe + " " : "default ") + String(e).split("\n")[0].slice(0, 200));
+				if (/singleton|in use|already (running|open)|lock|EBUSY|EPERM/i.test(String(e))) {
+					pcClearSingleton(dir);
+					await new Promise((r) => setTimeout(r, 1200));
+				}
+			}
+		}
+		if (!ctx) return {
+			ok: false,
+			waitedMs: Date.now() - startedAt,
+			error: "有头浏览器启动失败（没有可用的完整 Chromium）: " + launchErr.join(" | ").slice(0, 500)
+		};
+		const page = (ctx.pages?.() ?? [])[0] ?? await ctx.newPage();
+		let startHost = "";
+		try {
+			startHost = new URL(baseUrl).hostname.toLowerCase();
+		} catch {}
+		await page.goto(baseUrl, {
+			waitUntil: "domcontentloaded",
+			timeout: 6e4
+		}).catch(() => {});
+		// [local patch 2026-10-22b] 全程追踪：从点「登录一次」到用户关闭浏览器窗口，记录访问过的每个页面；
+		// 不再一检测到登录成功就关窗口（用户往往还要点进「我的稿件 / 作者中心」），每出现新页面就试一次结构识别，
+		// 最后把整条访问轨迹 + 命中的 plan 一起报回面板。
+		const TRACE_CAP_MS = 18e5;
+		const TRACE: Array<{ at: number; url: string; title: string }> = [];
+		const traceSeen = new Set<string>();
+		const __pcTracePush = (u: string, t: string) => {
+			const url = String(u ?? "");
+			if (!url || traceSeen.has(url) || url === "about:blank") return;
+			traceSeen.add(url);
+			TRACE.push({ at: Math.round((Date.now() - startedAt) / 1000), url, title: String(t ?? "").slice(0, 120) });
+		};
+		let lastUrl = String(page.url?.() ?? "");
+		let okUrl = "";
+		let loggedIn = false;
+		let browserClosed = false;
+		try {
+			ctx.on?.("close", () => {
+				browserClosed = true;
+			});
+		} catch {}
+		let __pcCreds: { username: string; password: string } | null = null;
+		let structure: any = null;
+		let planAt = "";
+		let attempts = 0;
+		let lastTryAt = 0;
+		let lastTryKey = "";
+		const tryRecognize = async (why: string) => {
+			if (structure && structure.plan) return;
+			const cb = onLoggedIn;
+			if (!cb) return;
+			if (attempts >= 8) return;
+			attempts += 1;
+			lastTryAt = Date.now();
+			const pagesNow: string[] = (ctx.pages?.() ?? []).map((pg: any) => String(pg.url?.() ?? "")).filter((u: string) => u && u !== "about:blank");
+			lastTryKey = pagesNow.slice().sort().join("\n");
+			log(defaultReportDir(), "登录追踪识别 #" + attempts + "（" + why + "）pages=" + pagesNow.length);
+			try {
+				const rec = await cb(ctx, pagesNow[0] || baseUrl);
+				if (rec && rec.plan) {
+					structure = rec;
+					planAt = String(rec.plan?.listUrl || "");
+					log(defaultReportDir(), "登录追踪识别成功 #" + attempts + " system=" + String(rec.plan?.system ?? "") + " listUrl=" + planAt);
+				} else if (rec && rec.error) {
+					structure = rec;
+				}
+			} catch (e) {
+				structure = { error: String(e) };
+			}
+		};
+		while (Date.now() - startedAt < TRACE_CAP_MS) {
+			await new Promise((r) => setTimeout(r, 1000));
+			if (browserClosed) break;
+			let pagesList: any[] = [];
+			try {
+				pagesList = ctx.pages?.() ?? [];
+			} catch {
+				browserClosed = true;
+				break;
+			}
+			if (!pagesList.length) {
+				browserClosed = true;
+				break;
+			}
+			// 1) 顺手记下账号密码（登录表单还在页面上时取 value；提交后页面跳走就没了）
+			if (!__pcCreds) {
+				for (const pg of pagesList) {
+					for (const fr of pg.frames?.() ?? []) {
+						try {
+							const got = await fr.evaluate(() => {
+								const pws: any[] = Array.from(document.querySelectorAll("input[type=password]")) as any[];
+								const pw: any = pws.find((i: any) => String(i.value || "").length > 0);
+								if (!pw) return null;
+								const form: any = pw.form || pw.closest?.("form") || document;
+								const cands: any[] = Array.from(form.querySelectorAll("input")).filter((i: any) => {
+									const ty = String(i.type || "").toLowerCase();
+									if (ty !== "text" && ty !== "email" && ty !== "") return false;
+									return i !== pw && String(i.value || "").length > 0;
+								});
+								const u: any = cands.find((i: any) => /user|email|login|account|name|id/i.test(String(i.name || "") + String(i.id || "") + String(i.placeholder || ""))) || cands[0];
+								return { username: String(u?.value || ""), password: String(pw.value || "") };
+							});
+							if (got && got.password) __pcCreds = { username: got.username, password: got.password };
+						} catch {}
+					}
+				}
+			}
+			// 2) 记录访问轨迹（新页面才取标题，避免每个 tick 都去查 title）
+			for (const pg of pagesList) {
+				try {
+					const u = String(pg.url?.() ?? "");
+					if (!u || traceSeen.has(u)) continue;
+					let t = "";
+					try {
+						t = String(await Promise.race([pg.title(), new Promise((r) => setTimeout(() => r(""), 1200))]) ?? "");
+					} catch {}
+					__pcTracePush(u, t);
+					lastUrl = u;
+				} catch {}
+			}
+			// 3) 登录态信号（只用于标记"已登录"，不再据此关窗口）
+			if (!loggedIn) {
+				for (const pg of pagesList) {
+					try {
+						const sig = await pcLoggedInSignal(pg, startHost);
+						if (sig.ok) {
+							loggedIn = true;
+							okUrl = sig.url;
+							break;
+						}
+					} catch {}
+				}
+				if (loggedIn) log(defaultReportDir(), "登录追踪：检测到登录成功 url=" + okUrl);
+			}
+			// 4) 页面集合变了就试一次识别（不要求已登录：有些门户检测不到登录信号，用户点进稿件列表本身就是证据）
+			if (!(structure && structure.plan) && Date.now() - lastTryAt > 1e4) {
+				const cur = pagesList.map((pg: any) => String(pg.url?.() ?? "")).filter((u: string) => u && u !== "about:blank").sort().join("\n");
+				if (cur && cur !== lastTryKey) await tryRecognize(loggedIn ? "页面变了" : "页面变了（还没检测到登录信号）");
+			}
+		}
+		// 收尾：补一次标题较全的轨迹快照
+		try {
+			for (const pg of ctx.pages?.() ?? []) {
+				const u = String(pg.url?.() ?? "");
+				if (!u || traceSeen.has(u)) continue;
+				let t = "";
+				try {
+					t = String(await Promise.race([pg.title(), new Promise((r) => setTimeout(() => r(""), 1200))]) ?? "");
+				} catch {}
+				__pcTracePush(u, t);
+			}
+		} catch {}
+		const plan = structure && structure.plan ? structure : null;
+		if (!structure) structure = { error: "没有识别到可用的稿件列表" };
+		if (!structure.plan) {
+			if (!loggedIn) structure = { error: "等了 " + Math.round(TRACE_CAP_MS / 6e4) + " 分钟没检测到登录成功（登录态可能已存进 profile，可再点一次试试）" };
+			else if (!structure.error) structure = { error: "登录成功，但在你访问过的页面里没认出击稿列表——请把面板下方轨迹里「我的稿件」那条网址直接填进上方再点一次" };
+		}
+		return {
+			ok: loggedIn || !!plan,
+			finalUrl: okUrl || lastUrl,
+			waitedMs: Date.now() - startedAt,
+			profileDir: dir,
+			structure,
+			planAt,
+			closedByUser: browserClosed,
+			pages: TRACE.slice(0, 60),
+			creds: __pcCreds ?? void 0
+		};
+	} catch (e) {
+		return {
+			ok: false,
+			waitedMs: Date.now() - startedAt,
+			error: String(e)
+		};
+	} finally {
+		try {
+			await ctx?.close?.();
+		} catch {}
+		release();
+	}
 }
+
 
 // ============ 第二步：登录后结构识别 + 通用抓取器 ============
 // 思路：人工登录一次拿到持久化登录态后，立刻把「登录态可见」的页面结构摘要交给 LLM 判型，

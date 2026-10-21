@@ -41,6 +41,7 @@ function PaperCheckerPanel(props: any): any {
   const [loginPlan, setLoginPlan] = React.useState<any>(null)
   // 登录一次时顺手记录到的账号密码（存进期刊条目，cookie 过期可自动重登）
   const [loginCreds, setLoginCreds] = React.useState<any>(null)
+  const [loginTrace, setLoginTrace] = React.useState<any[]>([])
   // 已经登录过（页面直接进后台、没有密码表单）时自动记录拿不到凭据：允许手动补录，跟条目一起保存
   const [manualUser, setManualUser] = React.useState<string>('')
   const [manualPass, setManualPass] = React.useState<string>('')
@@ -127,8 +128,8 @@ function PaperCheckerPanel(props: any): any {
   const loginOnce = async () => {
     const target = (loginUrl || dUrl || '').trim(); setLoginUrl(target)
     if (!target) { setLoginMsg('请先在上面填写期刊网址'); return }
-    setLoginBusy(true); setLoginOk(false); setLoginPlan(null); setLoginCreds(null)
-    setLoginMsg('登录中… 请在打开的窗口里完成登录（最多等 10 分钟）')
+    setLoginBusy(true); setLoginOk(false); setLoginPlan(null); setLoginCreds(null); setLoginTrace([])
+    setLoginMsg('登录窗口已打开：登录后请继续点开「我的稿件 / 作者中心」等页面，看完后**关闭浏览器窗口**，我会把访问过的页面全部列出来并尝试识别（最长 18 分钟）')
     // 顺手把期刊名带上，识别结果落到 structures/<key>.json 时能对上配置里的期刊
     const hit = (Array.isArray(journalItems) ? journalItems : []).find((j2: any) => String(j2?.baseUrl ?? '').replace(/\/+$/, '') === target.replace(/\/+$/, ''))
     const journalName = String(hit?.name ?? '')
@@ -142,10 +143,9 @@ function PaperCheckerPanel(props: any): any {
         const credLine = (res.credentials && res.credentials.password) ? '；已同步记录账号密码 ✓' : '（本次未记录账号密码——ORCID/SSO 登录没有可记的表单，靠持久化 cookie）'
         // [patch 2026-10-22] 识别失败时把「浏览器里实际看到的页面」列出来：用户才知道自己粘的是统一身份门户还是投稿系统
         const pgs: any[] = Array.isArray(res.pages) ? res.pages : []
-        const pageLine = (!res.plan && pgs.length)
-          ? '；本次浏览器里看到的页面：' + pgs.slice(0, 4).map((x: any) => String(x.url ?? '')).filter(Boolean).join(' | ')
-          : ''
-        setLoginMsg('登录成功 ✓ 登录态已保存（' + (res.finalUrl ?? '') + '，用时 ' + Math.round((res.waitedMs ?? 0) / 1000) + 's）' + errLine + credLine + pageLine)
+        setLoginTrace(pgs)
+        const pageLine = pgs.length ? '；你访问过的页面见下方轨迹（共 ' + pgs.length + ' 条，可点选）' : ''
+        setLoginMsg('登录结束 ✓（用时 ' + Math.round((res.waitedMs ?? 0) / 1000) + 's' + (res.closedByUser ? '，你关闭了窗口' : '') + '）' + errLine + credLine + pageLine)
       } else {
         setLoginMsg('登录未完成: ' + (res.error ?? '未知错误'))
       }
@@ -343,13 +343,22 @@ function PaperCheckerPanel(props: any): any {
       }),
       React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center', flexWrap: 'wrap' } },
         React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', onClick: loginOnce, disabled: loginBusy },
-          loginBusy ? '登录中…（最多 10 分钟）' : '🔐 登录一次并识别'),
+          loginBusy ? '登录中…（关闭浏览器后结束）' : '🔐 登录一次并识别'),
         React.createElement('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary, #999)' } },
-          '在打开的浏览器里用 ORCID / 学校 SSO / 账号密码人工登录一次（cookie 会保存），插件自动识别该投稿系统的结构；然后在下面填期刊名并加入列表。'),
+          '在打开的浏览器里人工登录一次（cookie 会保存）。登录后**继续点开「我的稿件 / Author Dashboard」等页面**，最后关闭浏览器窗口 —— 插件会记录你访问过的每一个页面，并自动识别投稿系统结构。'),
       ),
       loginMsg ? React.createElement('div', { style: { fontSize: 11, marginBottom: 4, color: loginOk ? 'var(--dsw-alias-label-secondary, #888)' : 'var(--dsw-alias-label-tertiary, #999)' } }, loginMsg) : null,
       loginPlan ? React.createElement('div', { style: { fontSize: 12, marginBottom: 6, color: 'var(--dsw-alias-label-secondary, #666)', wordBreak: 'break-all' } },
         '已识别系统：' + String(loginPlan.system || 'other') + '（置信度 ' + (Number(loginPlan.confidence ?? 0) || 0).toFixed(2) + '）/ 抓取入口：' + (loginPlan.listUrl || '(未识别到列表页，可再登录一次)'),
+      ) : null,
+      loginTrace.length ? React.createElement('div', { style: { marginBottom: 6, maxHeight: 150, overflow: 'auto', border: '1px solid var(--dsw-alias-border-l1, #ccc)', borderRadius: 6, padding: 6, fontSize: 11, lineHeight: 1.5 } },
+        React.createElement('div', { style: { ...s.hint, marginBottom: 3 } }, '你在登录窗口里访问过的页面（按时间顺序；点一条把它填成入口网址）：'),
+        ...loginTrace.map((p: any, i: number) => React.createElement('div', {
+          key: i,
+          style: { wordBreak: 'break-all', cursor: 'pointer', color: (loginPlan && String(loginPlan.listUrl) === String(p.url)) ? 'var(--dsw-alias-label-primary, #222)' : 'var(--dsw-alias-label-secondary, #777)' },
+          title: String(p.title ?? '') + '（点击填入入口网址）',
+          onClick: () => { const u = String(p.url ?? ''); setLoginUrl(u); setDUrl(u) },
+        }, (p.at != null ? String(p.at) + 's  ' : '') + String(p.url ?? ''))),
       ) : null,
       loginCreds && loginCreds.password
         ? React.createElement('div', { style: { fontSize: 11, marginBottom: 6, color: 'var(--dsw-alias-label-secondary, #888)' } },
