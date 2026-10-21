@@ -1995,7 +1995,10 @@ function pushServerChan(key: string, title: string, desp: string): Promise<boole
         // Server酱：HTTP 200 不代表成功，业务 code===0 才是
         try {
           const parsed = JSON.parse(buf)
-          resolve(res.statusCode === 200 && parsed && parsed.code === 0)
+          // [patch 2026-10-22j] 失败时把返回体记下来
+          const okPush = res.statusCode === 200 && parsed && parsed.code === 0
+          if (!okPush) { try { log(defaultReportDir(), '微信推送失败详情: status=' + res.statusCode + ' body=' + String(buf).slice(0, 300)) } catch {} }
+          resolve(okPush)
         } catch {
           resolve(res.statusCode === 200)
         }
