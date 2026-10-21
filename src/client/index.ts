@@ -140,7 +140,12 @@ function PaperCheckerPanel(props: any): any {
         setLoginCreds(res.credentials ?? null)
         const errLine = res.planError ? '；结构识别未完成: ' + res.planError : ''
         const credLine = (res.credentials && res.credentials.password) ? '；已同步记录账号密码 ✓' : '（本次未记录账号密码——ORCID/SSO 登录没有可记的表单，靠持久化 cookie）'
-        setLoginMsg('登录成功 ✓ 登录态已保存（' + (res.finalUrl ?? '') + '，用时 ' + Math.round((res.waitedMs ?? 0) / 1000) + 's）' + errLine + credLine)
+        // [patch 2026-10-22] 识别失败时把「浏览器里实际看到的页面」列出来：用户才知道自己粘的是统一身份门户还是投稿系统
+        const pgs: any[] = Array.isArray(res.pages) ? res.pages : []
+        const pageLine = (!res.plan && pgs.length)
+          ? '；本次浏览器里看到的页面：' + pgs.slice(0, 4).map((x: any) => String(x.url ?? '')).filter(Boolean).join(' | ')
+          : ''
+        setLoginMsg('登录成功 ✓ 登录态已保存（' + (res.finalUrl ?? '') + '，用时 ' + Math.round((res.waitedMs ?? 0) / 1000) + 's）' + errLine + credLine + pageLine)
       } else {
         setLoginMsg('登录未完成: ' + (res.error ?? '未知错误'))
       }
@@ -175,25 +180,35 @@ function PaperCheckerPanel(props: any): any {
       sections: Array.isArray(plan.menuSections) ? plan.menuSections : [],
       system: plan.system || 'other',
     })
-    setJournalsText(JSON.stringify(journals, null, 2))
     setLoginName('')
     setLoginPlan(null)
     setManualUser('')
     setManualPass('')
-    setLoginMsg('已加入期刊列表' + (uPass ? '（已记录账号密码 ✓）' : '（未记录账号密码，只靠持久化 cookie）') + '，记得点下方「保存」生效')
+    setLoginMsg('已加入期刊列表' + (uPass ? '（已记录账号密码 ✓）' : '（未记录账号密码，只靠持久化 cookie）') + '，正在保存…')
+    // [patch 2026-10-22] 加入后立刻落盘，不再要求用户再点一次「保存」
+    void saveJournalsNow(journals, '已加入「' + name + '」')
   }
 
   // 列表操作（删除/清空/排序）立刻落盘：以前只改本地 JSON 缓冲区，必须再点一次「保存」，
   // 用户看到的就成了"删了又回来"（加上 GET 的旧值覆盖）。这里直接写设置，失败只提示、不回滚输入。
   const saveJournalsNow = async (next: any[], note: string) => {
     setJournalsText(JSON.stringify(next, null, 2))
-    if (!cfg) return
     setSaving(true)
+    // [patch 2026-10-22] 只提交 journals 一个字段：面板里的旧 cfg 不参与写回，避免把别的设置（含别的窗口刚改的值）覆盖回去
+    const post = async (expected: number) => fetchJson('/config', {
+      method: 'POST',
+      body: JSON.stringify({ config: { journals: next }, expectedRevision: expected }),
+    })
     try {
-      const res = await fetchJson('/config', {
-        method: 'POST',
-        body: JSON.stringify({ config: { ...cfg, journals: next }, expectedRevision: revision }),
-      })
+      let res: any = await post(revision)
+      // 版本冲突（面板打开期间配置被别处改过）：重读一次再重试，别让用户看到"保存失败"
+      if (!res.ok && /revision|changed since|conflict/i.test(String(res.error ?? ''))) {
+        const fresh: any = await fetchJson('/config')
+        const rv = Number(fresh?.revision ?? 0)
+        if (fresh?.config) setCfg(fresh.config)
+        setRevision(rv)
+        res = await post(rv)
+      }
       if (res.ok) {
         setRevision(res.revision ?? revision + 1)
         setMsg(note + ' ✓（已自动保存）')
@@ -308,7 +323,7 @@ function PaperCheckerPanel(props: any): any {
           onChange: (e: any) => setCfg({ ...cfg, discoverProvider: e.target.value, discoverModel: '' }),
         },
           React.createElement('option', { value: '' }, '识别模型 Provider（默认）'),
-          ...modelGroups.map((g: any) => React.createElement('option', { key: g.id, value: g.id }, g.name || g.id)),
+          ...modelGroups.filter((g: any) => Array.isArray(g.models) && g.models.length > 0).map((g: any) => React.createElement('option', { key: g.id, value: g.id }, g.name || g.id)),
         ),
         React.createElement('select', {
           style: { ...s.input, flex: 1 },
@@ -355,7 +370,8 @@ function PaperCheckerPanel(props: any): any {
               onChange: (e: any) => setManualPass(e.target.value),
             }),
           ) : null),
-      loginPlan ? React.createElement('div', { style: { marginTop: 4, padding: 8, borderRadius: 6, border: '1px solid var(--dsw-alias-border-l1, #ccc)', fontSize: 12 } },
+      loginOk && !loginPlan ? React.createElement('div', { style: { fontSize: 11, marginBottom: 4, color: 'var(--dsw-alias-label-tertiary, #999)' } }, '结构识别没成功，但仍可先加入列表（抓取时会再试一次识别；也可以回去重新选识别模型后再登录一次）。') : null,
+      loginOk ? React.createElement('div', { style: { marginTop: 4, padding: 8, borderRadius: 6, border: '1px solid var(--dsw-alias-border-l1, #ccc)', fontSize: 12 } },
         React.createElement('label', { style: { ...s.label, marginBottom: 2 } }, '期刊名（加入列表时用）'),
         React.createElement('input', {
           style: { ...s.input, marginBottom: 6 },
@@ -364,7 +380,7 @@ function PaperCheckerPanel(props: any): any {
           onChange: (e: any) => setLoginName(e.target.value),
         }),
         React.createElement('div', { style: { marginTop: 2 } },
-          React.createElement('button', { style: s.btn, type: 'button', onClick: addFromLogin }, '加入期刊列表'),
+          React.createElement('button', { style: s.btn, type: 'button', onClick: addFromLogin }, '加入期刊列表（立刻保存）'),
         ),
       ) : null,
       React.createElement('div', { style: s.hint }, '上面的 Provider/模型 只用于「识别投稿系统结构」这一步（不影响 DSH 主对话模型；留空则用当前默认模型）。登录成功后自动探测该系统的列表页/字段并写入本地结构缓存（~/.dsh/paper-checker/structures/）；同时把你在登录表单里输入的账号密码一并记录到期刊条目里（ORCID/SSO 登录没有表单则只靠持久化登录态）。加入列表并「保存」后，定时检查与「立即检查」都复用这份登录态。'),

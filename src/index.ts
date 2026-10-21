@@ -826,6 +826,8 @@ let __pcLoginOnceBusy = false
  *  登录态（cookie）随 profile 落盘，之后的无头抓取直接复用。 */
 async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ctxAny: any, finalUrl: string) => Promise<any>): Promise<{
   ok: boolean; finalUrl?: string; waitedMs?: number; error?: string; profileDir?: string; structure?: any
+  /** [local patch 2026-10-22] 登录窗口里所有页面（url/title），用来告诉用户"你登录的其实是统一身份门户" */
+  pages?: Array<{ url: string; title: string }>
   /** 轮询期间顺手记录的账号密码（cookie 过期时用来重新登录；ORCID/SSO 登录拿不到） */
   creds?: { username: string; password: string }
 }> {
@@ -898,12 +900,24 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
       if (stable >= 2) break // 连续 2 次（间隔 ~2s）停在同一个业务页 = 认为登录稳定
     }
     if (okUrl) {
+      // [local patch 2026-10-22] 把登录窗口里所有页面报回面板（用户常把统一身份门户当投稿系统）
+      const __pages: Array<{ url: string; title: string }> = []
+      for (const pg of ctx.pages?.() ?? []) {
+        try {
+          const u = String(pg.url?.() ?? '')
+          let t = ''
+          try {
+            t = String(await Promise.race([pg.title(), new Promise((r) => setTimeout(() => r(''), 1500))]) ?? '')
+          } catch {}
+          if (u) __pages.push({ url: u, title: t.slice(0, 120) })
+        } catch {}
+      }
       // 第二步：登录成功后、关窗口之前先做结构识别（复用刚拿到的登录态，不用二次登录）。
       let structure: any
       if (onLoggedIn) {
         try { structure = await onLoggedIn(ctx, okUrl) } catch (e) { structure = { error: String(e) } }
       }
-      return { ok: true, finalUrl: okUrl, waitedMs: Date.now() - startedAt, profileDir: dir, structure, creds: __pcCreds ?? undefined }
+      return { ok: true, finalUrl: okUrl, waitedMs: Date.now() - startedAt, profileDir: dir, structure, pages: __pages, creds: __pcCreds ?? undefined }
     }
     return {
       ok: false,
@@ -1863,6 +1877,8 @@ async function buildModelGroupsPC(llmService: any, settingsService: any): Promis
       if (!provs || typeof provs !== 'object') continue
       for (const k of Object.keys(provs)) {
         const p = provs[k] ?? {}
+        // [local patch 2026-10-22] 没配 API key 的 provider 是死的：不进下拉
+        if (!pcProviderKeyOkPC(p)) continue
         push(k, p.name || k, Array.isArray(p.models) ? p.models : [])
       }
     }
@@ -1882,7 +1898,21 @@ async function buildModelGroupsPC(llmService: any, settingsService: any): Promis
     const i = out.findIndex((g) => g.id === defProvider)
     if (i > 0) out.unshift(out.splice(i, 1)[0])
   }
-  return out
+  // [local patch 2026-10-22] 只留「有模型目录」的 provider（默认 provider 例外）
+  return out.filter((g: any) => (g.models && g.models.length > 0) || g.id === defProvider)
+}
+
+/** [local patch 2026-10-22] provider 是否真的能用：apiKeyEnv 缺失即死配置。 */
+function pcProviderKeyOkPC(p: any): boolean {
+  try {
+    if (!p || typeof p !== 'object') return true
+    if (typeof p.apiKey === 'string' && p.apiKey.trim()) return true
+    if (typeof p.apiKeyEnv === 'string' && p.apiKeyEnv.trim()) {
+      const k = p.apiKeyEnv.trim()
+      return !!(typeof process !== 'undefined' && process.env && process.env[k])
+    }
+    return true
+  } catch { return true }
 }
 
 /** provider id 是否真的可用：运行时注册表 + 可配置目录（settingsNs 不算）。 */
