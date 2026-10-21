@@ -1810,14 +1810,18 @@ async function buildModelGroupsPC(llmService: any, settingsService: any): Promis
     defModel = dm?.model ?? ''
   } catch { /* 忽略 */ }
   const push = (id: string, name: string, models: any[]) => {
-    if (!id || seen.has(id)) return
+    if (!id) return
+    const list = (models ?? []).map((m: any) => ({ id: String(m?.id ?? m ?? ''), name: String(m?.name ?? m?.id ?? m ?? '') })).filter((m: any) => !!m.id)
+    // 目录为空也要保留 provider：面板模型下拉有「识别模型（默认）」兜底，选空即用该 provider 的第一个模型
+    const existing = out.find((g) => g.id === id)
+    if (existing) {
+      // 可配置 provider 目录先以空模型登记，后面 settings 的 providers 声明里有模型要补进来
+      if (!existing.models.length && list.length) existing.models = list
+      if ((!existing.name || existing.name === existing.id) && name) existing.name = name
+      return
+    }
     seen.add(id)
-    out.push({
-      id,
-      name: name || id,
-      // 目录为空也要保留 provider：面板模型下拉有「识别模型（默认）」兜底，选空即用该 provider 的第一个模型
-      models: (models ?? []).map((m: any) => ({ id: String(m?.id ?? m ?? ''), name: String(m?.name ?? m?.id ?? m ?? '') })).filter((m: any) => !!m.id),
-    })
+    out.push({ id, name: name || id, models: list })
   }
   // 1) 真源：LLM 运行时注册表 listProviders()/listModels()。官方 DeepSeek 账号（provider id = deepseek-account）
   //    这类内置 provider 只存在于运行时，settings 里根本查不到 → 早先只扫 settings 才会出现"下拉里没有官方账号"。
