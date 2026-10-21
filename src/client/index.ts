@@ -10,7 +10,7 @@ type ClientContext = {
   get(name: string): any
 }
 
-export const inject = ['slots', 'connection']
+export const inject = ['slots']
 
 const API = '/paper-checker/api'
 
@@ -22,7 +22,6 @@ function fetchJson(path: string, init?: any): Promise<any> {
 }
 
 function PaperCheckerPanel(props: any): any {
-  const api = props.api
   const [cfg, setCfg] = React.useState<any>(null)
   const [revision, setRevision] = React.useState<number>(0)
   const [journalsText, setJournalsText] = React.useState<string>('')
@@ -32,13 +31,7 @@ function PaperCheckerPanel(props: any): any {
   const [report, setReport] = React.useState<string>('')
   const [sessions, setSessions] = React.useState<any[]>([])
   const [dUrl, setDUrl] = React.useState<string>('')
-  const [dUser, setDUser] = React.useState<string>('')
-  const [dPass, setDPass] = React.useState<string>('')
-  const [discovering, setDiscovering] = React.useState<boolean>(false)
-  const [discovered, setDiscovered] = React.useState<any>(null)
-  const [discoveredName, setDiscoveredName] = React.useState<string>('')
-  const [discoverMsg, setDiscoverMsg] = React.useState<string>('')
-  const [modelGroups, setModelGroups] = React.useState<any[]>([])
+  const [loginName, setLoginName] = React.useState<string>('')
   // 「登录一次」（B 方案）：有头浏览器里人工完成 ORCID / SSO 登录，cookie 存进持久化 profile
   const [loginUrl, setLoginUrl] = React.useState<string>('')
   const [loginBusy, setLoginBusy] = React.useState<boolean>(false)
@@ -46,6 +39,8 @@ function PaperCheckerPanel(props: any): any {
   const [loginOk, setLoginOk] = React.useState<boolean>(false)
   // 登录成功后模型识别出的投稿系统结构（editorial-manager / scholarone / …）
   const [loginPlan, setLoginPlan] = React.useState<any>(null)
+  // 登录一次时顺手记录到的账号密码（存进期刊条目，cookie 过期可自动重登）
+  const [loginCreds, setLoginCreds] = React.useState<any>(null)
 
   const loadSessions = React.useCallback(() => {
     // 服务端把会话列表搭在 /config 上返回（/sessions 在渲染进程里会静默失败）
@@ -53,24 +48,6 @@ function PaperCheckerPanel(props: any): any {
       if (res && res.ok && Array.isArray(res.sessions)) setSessions(res.sessions)
     }).catch(() => {})
   }, [])
-
-  const loadProviders = React.useCallback(() => {
-    // DSH 0.2 不再暴露 connection.api.llm.models；服务端把 provider/模型列表搭在 /config 上
-    if (!api?.llm?.models) {
-      fetchJson('/config').then((res: any) => {
-        if (res && res.ok && Array.isArray(res.modelGroups)) setModelGroups(res.modelGroups)
-      }).catch(() => {})
-      return
-    }
-    api.llm.models({}).then((res: any) => {
-      const groups = res?.result?.value?.groups || []
-      setModelGroups(groups.map((g: any) => ({
-        id: g.id,
-        name: g.name,
-        models: (g.models || []).map((m: any) => ({ id: m.id, name: m.name })),
-      })))
-    }).catch(() => {})
-  }, [api])
 
   React.useEffect(() => {
     let alive = true
@@ -85,9 +62,8 @@ function PaperCheckerPanel(props: any): any {
       }
     }).catch((e: any) => { if (alive) setMsg('加载异常: ' + String(e)) })
     loadSessions()
-    loadProviders()
     return () => { alive = false }
-  }, [loadSessions, loadProviders])
+  }, [loadSessions])
 
   const save = async () => {
     if (!cfg) return
@@ -126,43 +102,6 @@ function PaperCheckerPanel(props: any): any {
     }
   }
 
-  const discover = async () => {
-    if (!dUrl.trim() || !dUser.trim() || !dPass) { setDiscoverMsg('请填写网址、账号、密码'); return }
-    setDiscovering(true); setDiscovered(null); setDiscoverMsg('')
-    try {
-      const res = await fetchJson('/discover', {
-        method: 'POST',
-        body: JSON.stringify({ baseUrl: dUrl.trim(), username: dUser.trim(), password: dPass }),
-      })
-      if (res.ok) {
-        // 服务端不再回显密码，这里用面板自己的输入补齐，保证「加入列表」写进配置的凭据完整。
-        setDiscovered({ ...(res.config || {}), username: dUser.trim(), password: dPass })
-        setDiscoveredName(res.config?.name || '')
-        setDiscoverMsg(res.llmError ? '（模型识别失败，已用页面信息回退）确认无误后点「加入列表」' : '识别成功，确认无误后点「加入列表」')
-      } else {
-        setDiscoverMsg('识别失败: ' + (res.error ?? ''))
-      }
-    } catch (e) {
-      setDiscoverMsg('识别异常: ' + String(e))
-    } finally {
-      setDiscovering(false)
-    }
-  }
-
-  const addDiscovered = () => {
-    if (!discovered) return
-    let journals: any[]
-    try { journals = JSON.parse(journalsText) } catch { journals = [] }
-    if (!Array.isArray(journals)) journals = []
-    const name = discoveredName.trim() || discovered.name || ''
-    if (!name) { setDiscoverMsg('期刊名不能为空'); return }
-    journals.push({ ...discovered, name })
-    setJournalsText(JSON.stringify(journals, null, 2))
-    setDiscovered(null)
-    setDiscoveredName('')
-    setDiscoverMsg('已加入列表，记得点「保存」')
-  }
-
   // ---- 已添加期刊列表：从 journalsText 派生，逐条删除（两段式确认）----
   const [confirmDel, setConfirmDel] = React.useState<number>(-1)
   const journalItems: any[] = (() => {
@@ -175,7 +114,7 @@ function PaperCheckerPanel(props: any): any {
   const loginOnce = async () => {
     const target = (loginUrl || dUrl || '').trim(); setLoginUrl(target)
     if (!target) { setLoginMsg('请先在上面填写期刊网址'); return }
-    setLoginBusy(true); setLoginOk(false); setLoginPlan(null)
+    setLoginBusy(true); setLoginOk(false); setLoginPlan(null); setLoginCreds(null)
     setLoginMsg('登录中… 请在打开的窗口里完成登录（最多等 10 分钟）')
     // 顺手把期刊名带上，识别结果落到 structures/<key>.json 时能对上配置里的期刊
     const hit = (Array.isArray(journalItems) ? journalItems : []).find((j2: any) => String(j2?.baseUrl ?? '').replace(/\/+$/, '') === target.replace(/\/+$/, ''))
@@ -185,8 +124,10 @@ function PaperCheckerPanel(props: any): any {
       if (res.ok) {
         setLoginOk(true)
         setLoginPlan(res.plan ?? null)
+        setLoginCreds(res.credentials ?? null)
         const errLine = res.planError ? '；结构识别未完成: ' + res.planError : ''
-        setLoginMsg('登录成功 ✓ 登录态已保存（' + (res.finalUrl ?? '') + '，用时 ' + Math.round((res.waitedMs ?? 0) / 1000) + 's）；之后的无头检查会复用这份 cookie' + errLine)
+        const credLine = (res.credentials && res.credentials.password) ? '；已同步记录账号密码 ✓' : '（本次未记录账号密码——ORCID/SSO 登录没有可记的表单，靠持久化 cookie）'
+        setLoginMsg('登录成功 ✓ 登录态已保存（' + (res.finalUrl ?? '') + '，用时 ' + Math.round((res.waitedMs ?? 0) / 1000) + 's）' + errLine + credLine)
       } else {
         setLoginMsg('登录未完成: ' + (res.error ?? '未知错误'))
       }
@@ -196,6 +137,34 @@ function PaperCheckerPanel(props: any): any {
       setLoginBusy(false)
     }
   }
+  // [modified] 新增期刊唯一入口：登录一次 + 结构识别 → 直接用识别结果加入列表（不再需要账号密码/自动识别）
+  const addFromLogin = () => {
+    const url = dUrl.trim()
+    if (!url) { setLoginMsg('请先填写期刊入口网址'); return }
+    let journals: any[]
+    try { journals = JSON.parse(journalsText) } catch { journals = [] }
+    if (!Array.isArray(journals)) journals = []
+    const norm = (x: string) => x.replace(/\/+$/, '').toLowerCase()
+    if (journals.some((j2: any) => norm(String(j2?.baseUrl ?? '')) === norm(url))) {
+      setLoginMsg('该网址已在期刊列表里，未重复加入')
+      return
+    }
+    const plan = loginPlan || {}
+    const name = loginName.trim() || url.replace(/^https?:\/\//, '').replace(/\/.*$/, '')
+    journals.push({
+      name,
+      baseUrl: url,
+      username: String(loginCreds?.username ?? ''),
+      password: String(loginCreds?.password ?? ''),
+      sections: Array.isArray(plan.menuSections) ? plan.menuSections : [],
+      system: plan.system || 'other',
+    })
+    setJournalsText(JSON.stringify(journals, null, 2))
+    setLoginName('')
+    setLoginPlan(null)
+    setLoginMsg('已加入期刊列表，记得点下方「保存」生效')
+  }
+
   const removeJournal = (idx: number) => {
     const next = journalItems.slice()
     const removed = next[idx]
@@ -292,64 +261,41 @@ function PaperCheckerPanel(props: any): any {
       React.createElement('div', { style: s.hint }, '只列出当前已打开的会话；若目标会话未打开，定时汇报会跳过对话（微信照常推送）。'),
     ),
     React.createElement('div', { style: { ...s.row, border: '1px dashed var(--dsw-alias-border-l1, #ccc)', borderRadius: 8, padding: 10 } },
-      React.createElement('label', { style: s.label }, '➕ 新增期刊（输入网址 + 账号密码，自动登录并识别）'),
-      React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 6 } },
-        React.createElement('select', {
-          style: { ...s.input, flex: 1 },
-          value: cfg.discoverProvider || '',
-          onChange: (e: any) => setCfg({ ...cfg, discoverProvider: e.target.value, discoverModel: '' }),
-        },
-          React.createElement('option', { value: '' }, '模型 Provider（默认）'),
-          ...modelGroups.map((g: any) => React.createElement('option', { key: g.id, value: g.id }, g.name || g.id)),
-        ),
-        React.createElement('select', {
-          style: { ...s.input, flex: 1 },
-          value: cfg.discoverModel || '',
-          onChange: (e: any) => setCfg({ ...cfg, discoverModel: e.target.value }),
-        },
-          React.createElement('option', { value: '' }, '模型（默认）'),
-          ...(modelGroups.find((g: any) => g.id === cfg.discoverProvider)?.models || []).map((m: any) => React.createElement('option', { key: m.id, value: m.id }, m.name || m.id)),
-        ),
-        React.createElement('button', { style: s.btn, type: 'button', onClick: loadProviders, title: '刷新模型列表' }, '刷新'),
-      ),
+      React.createElement('label', { style: s.label }, '➕ 新增期刊（登录一次 + 自动识别结构）'),
       React.createElement('input', {
         style: { ...s.input, marginBottom: 6 },
-        placeholder: '站点网址，如 https://www.editorialmanager.com/conbuildmat',
+        placeholder: '期刊入口网址，如 https://www.editorialmanager.com/conbuildmat',
         value: dUrl,
         onChange: (e: any) => setDUrl(e.target.value),
       }),
-      // [modified] 登录一次内嵌在「新增期刊」里：ORCID / 学校 SSO 等无法用账号密码完成的登录，先人工登录一次并保存 cookie
       React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center', flexWrap: 'wrap' } },
         React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', onClick: loginOnce, disabled: loginBusy },
-          loginBusy ? '登录中…（最多 10 分钟）' : '🔐 登录一次（ORCID / 学校 SSO）'),
+          loginBusy ? '登录中…（最多 10 分钟）' : '🔐 登录一次并识别'),
         React.createElement('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary, #999)' } },
-          '非 Editorial Manager 的期刊（如 Taylor&Francis / ScholarOne）：先在上面填网址，点这里人工登录一次，插件会保存登录态并自动识别该系统结构；EM 期刊可直接用下面的账号密码自动识别。'),
+          '在打开的浏览器里用 ORCID / 学校 SSO / 账号密码人工登录一次（cookie 会保存），插件自动识别该投稿系统的结构；然后在下面填期刊名并加入列表。'),
       ),
       loginMsg ? React.createElement('div', { style: { fontSize: 11, marginBottom: 4, color: loginOk ? 'var(--dsw-alias-label-secondary, #888)' : 'var(--dsw-alias-label-tertiary, #999)' } }, loginMsg) : null,
       loginPlan ? React.createElement('div', { style: { fontSize: 12, marginBottom: 6, color: 'var(--dsw-alias-label-secondary, #666)', wordBreak: 'break-all' } },
-        '已识别系统：' + String(loginPlan.system || 'other') + '（置信度 ' + (Number(loginPlan.confidence ?? 0) || 0).toFixed(2) + '）/ 抓取入口：' + (loginPlan.listUrl || '(未识别到列表页，可再点一次登录)'),
+        '已识别系统：' + String(loginPlan.system || 'other') + '（置信度 ' + (Number(loginPlan.confidence ?? 0) || 0).toFixed(2) + '）/ 抓取入口：' + (loginPlan.listUrl || '(未识别到列表页，可再登录一次)'),
       ) : null,
-      React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 6 } },
-        React.createElement('input', { style: { ...s.input, flex: 1 }, placeholder: '账号', value: dUser, onChange: (e: any) => setDUser(e.target.value) }),
-        React.createElement('input', { style: { ...s.input, flex: 1 }, placeholder: '密码', type: 'password', value: dPass, onChange: (e: any) => setDPass(e.target.value) }),
-      ),
-      React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
-        React.createElement('button', { style: s.btn, type: 'button', onClick: discover, disabled: discovering }, discovering ? '登录识别中…' : '自动识别'),
-        discoverMsg ? React.createElement('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary, #999)' } }, discoverMsg) : null,
-      ),
-      discovered ? React.createElement('div', { style: { marginTop: 8, padding: 8, borderRadius: 6, border: '1px solid var(--dsw-alias-border-l1, #ccc)', fontSize: 12 } },
-        React.createElement('label', { style: { ...s.label, marginBottom: 2 } }, '期刊名（可修改，自动识别可能不准）'),
+      loginCreds && loginCreds.password
+        ? React.createElement('div', { style: { fontSize: 11, marginBottom: 6, color: 'var(--dsw-alias-label-secondary, #888)' } },
+            '已同步记录账号密码（' + String(loginCreds.username || '(空)') + '）：存进期刊条目，cookie 过期时可自动重新登录。')
+        : null,
+      loginPlan ? React.createElement('div', { style: { marginTop: 4, padding: 8, borderRadius: 6, border: '1px solid var(--dsw-alias-border-l1, #ccc)', fontSize: 12 } },
+        React.createElement('label', { style: { ...s.label, marginBottom: 2 } }, '期刊名（加入列表时用）'),
         React.createElement('input', {
           style: { ...s.input, marginBottom: 6 },
-          value: discoveredName,
-          onChange: (e: any) => setDiscoveredName(e.target.value),
+          placeholder: '如 Road Materials and Pavement Design',
+          value: loginName,
+          onChange: (e: any) => setLoginName(e.target.value),
         }),
-        React.createElement('div', null, '分区（' + (Array.isArray(discovered.sections) ? discovered.sections.length : 0) + ' 个）：' + (Array.isArray(discovered.sections) ? discovered.sections.slice(0, 8).join('、') + (discovered.sections.length > 8 ? ' 等' : '') : '')),
-        React.createElement('div', { style: { marginTop: 6 } },
-          React.createElement('button', { style: s.btn, type: 'button', onClick: addDiscovered }, '加入列表'),
+        React.createElement('div', { style: { marginTop: 2 } },
+          React.createElement('button', { style: s.btn, type: 'button', onClick: addFromLogin }, '加入期刊列表'),
         ),
       ) : null,
-      React.createElement('div', { style: s.hint }, '自动打开期刊网站登录，探测主菜单上的全部投稿分区（含当前 0 篇的分区）并识别期刊名，生成后加入下方期刊列表；保存后每次检查会按探测结果自动抓取各分区（出现新稿件即被抓到），无需手动维护分区。'),
+      React.createElement('div', { style: s.hint }, '登录成功后自动探测该系统的列表页/字段并写入本地结构缓存（~/.dsh/paper-checker/structures/）；同时把你在登录表单里输入的账号密码一并记录到期刊条目里（ORCID/SSO 登录没有表单则只靠持久化登录态）。加入列表并「保存」后，定时检查与「立即检查」都复用这份登录态。'),
+
     ),
     React.createElement('div', { style: { ...s.row, border: '1px solid var(--dsw-alias-border-l1, #ccc)', borderRadius: 8, padding: 10 } },
       React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
@@ -364,7 +310,7 @@ function PaperCheckerPanel(props: any): any {
       journalsInvalid
         ? React.createElement('div', { style: s.hint }, '下方 JSON 当前不是合法数组，无法列出条目。')
         : (journalItems.length === 0
-          ? React.createElement('div', { style: s.hint }, '（暂无期刊。用上面的「新增期刊」识别，或直接编辑下方 JSON。）')
+          ? React.createElement('div', { style: s.hint }, '（暂无期刊。用上面的「新增期刊」先登录一次再加入，或直接编辑下方 JSON。）')
           : React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
               ...journalItems.map((j2: any, i: number) =>
                 React.createElement('div', {
@@ -373,7 +319,7 @@ function PaperCheckerPanel(props: any): any {
                 },
                   React.createElement('div', { style: { flex: 1, minWidth: 0 } },
                     React.createElement('div', { style: { fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-                      (j2?.name || '(未命名)') + (j2?.system === 'other' ? ' · AI 回退' : ' · 确定性抓取')),
+                      (j2?.name || '(未命名)') + (j2?.system === 'editorial-manager' ? ' · 确定性抓取' : ' · 结构抓取')),
                     React.createElement('div', { style: { ...s.hint, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
                       String(j2?.baseUrl ?? '') +
                         ' · 分区 ' + (Array.isArray(j2?.sections) ? j2.sections.length : 0) + ' 个' +
@@ -404,7 +350,7 @@ function PaperCheckerPanel(props: any): any {
         spellCheck: false,
       }),
       React.createElement('div', { style: s.hint },
-        '每项字段：name 期刊名、baseUrl 站点根地址、username/password 登录凭据、sections 要检查的分区名数组、system 为 editorial-manager（确定性）或 other（AI 回退）。',
+        '每项字段：name 期刊名、baseUrl 站点根地址、sections 要检查的分区名数组、system 为 editorial-manager（确定性）或 other（登录一次识别出的通用结构抓取）。username/password 由「登录一次」自动记录（可留空，靠持久化 cookie）。',
       ),
     ),
     React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 12 } },
@@ -417,12 +363,11 @@ function PaperCheckerPanel(props: any): any {
 }
 
 export function apply(ctx: ClientContext): void {
-  const api = ctx.get('connection')?.api
   // 配置界面挂在侧栏「插件」页里本 bundle 的详情页上，而不是设置里：
   // plugins.bundle.config 按 bundle 的 npm 包名索引，页面在描述与行列表之间渲染它。
   // 页面自己画标题/图标/面包屑；注册随 bundle 的开关存在，bundle 关掉时自然消失。
   ctx.effect(() => ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
     name: 'plugins.bundle.config',
     key: '@dsh-external/dsh-paper-checker',
-  }, (props: any) => (props?.view === 'summary' ? null : React.createElement(PaperCheckerPanel, { ...props, api })))), 'paper-checker: bundle config')
+  }, (props: any) => (props?.view === 'summary' ? null : React.createElement(PaperCheckerPanel, props)))), 'paper-checker: bundle config')
 }

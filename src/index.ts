@@ -826,6 +826,8 @@ let __pcLoginOnceBusy = false
  *  登录态（cookie）随 profile 落盘，之后的无头抓取直接复用。 */
 async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ctxAny: any, finalUrl: string) => Promise<any>): Promise<{
   ok: boolean; finalUrl?: string; waitedMs?: number; error?: string; profileDir?: string; structure?: any
+  /** 轮询期间顺手记录的账号密码（cookie 过期时用来重新登录；ORCID/SSO 登录拿不到） */
+  creds?: { username: string; password: string }
 }> {
   const { chromium } = pwRequire('playwright-core')
   const startedAt = Date.now()
@@ -859,8 +861,30 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
     let okUrl = ''
     let stable = 0
     let lastUrl = String(page.url?.() ?? '')
+    // [modified] 每轮顺手记下用户正在输入的账号密码（登录表单还在页面上时取 value；提交后页面跳走就没了）
+    let __pcCreds: { username: string; password: string } | null = null
     while (Date.now() - startedAt < PC_LOGIN_TIMEOUT_MS) {
       await new Promise((r) => setTimeout(r, 1000))
+      for (const pg of (ctx.pages?.() ?? [])) {
+        for (const fr of (pg.frames?.() ?? [])) {
+          try {
+            const got = await fr.evaluate(() => {
+              const pws: any[] = Array.from(document.querySelectorAll('input[type=password]')) as any[]
+              const pw: any = pws.find((i: any) => String(i.value || '').length > 0)
+              if (!pw) return null
+              const form: any = (pw as any).form || (pw as any).closest?.('form') || document
+              const cands = Array.from(form.querySelectorAll('input')).filter((i: any) => {
+                const ty = String(i.type || '').toLowerCase()
+                if (ty !== 'text' && ty !== 'email' && ty !== '') return false
+                return i !== pw && String(i.value || '').length > 0
+              })
+              const u: any = cands.find((i: any) => /user|email|login|account|name|id/i.test(String(i.name || '') + String(i.id || '') + String(i.placeholder || ''))) || cands[0]
+              return { username: String(u?.value || ''), password: String(pw.value || '') }
+            })
+            if (got && got.password) __pcCreds = { username: got.username, password: got.password }
+          } catch { /* 跨域 iframe / 页面已跳转：静默 */ }
+        }
+      }
       let hit = ''
       for (const pg of (ctx.pages?.() ?? [])) {
         const u = String(pg.url?.() ?? '')
@@ -879,7 +903,7 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
       if (onLoggedIn) {
         try { structure = await onLoggedIn(ctx, okUrl) } catch (e) { structure = { error: String(e) } }
       }
-      return { ok: true, finalUrl: okUrl, waitedMs: Date.now() - startedAt, profileDir: dir, structure }
+      return { ok: true, finalUrl: okUrl, waitedMs: Date.now() - startedAt, profileDir: dir, structure, creds: __pcCreds ?? undefined }
     }
     return {
       ok: false,
@@ -2241,6 +2265,8 @@ export function apply(ctx: AppContext, config: Config): void {
               plan: plan ? { system: plan.system, confidence: plan.confidence, listUrl: plan.listUrl, fields: plan.fields } : null,
               planPath,
               planError,
+              // [modified] 把轮询期捕获到的账号密码一并回给面板，面板随期刊条目存进配置（cookie 过期可自动重登）
+              credentials: (rOnce as any).creds ?? null,
               profileDir: pcProfileDir(),
             })
           } finally {
