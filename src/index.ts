@@ -964,6 +964,8 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 			});
 		} catch {}
 		let __pcCreds: { username: string; password: string } | null = null;
+		// [patch 2026-10-22i] 登录成功后冻结凭据（只记最后一次成功登录时用的）
+		let __pcCredsLocked = false;
 		let structure: any = null;
 		let planAt = "";
 		let attempts = 0;
@@ -1014,7 +1016,8 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 			}
 			emptyTicks = 0;
 			// 1) 顺手记下账号密码（登录表单还在页面上时取 value；提交后页面跳走就没了）
-			if (!__pcCreds) {
+			// [patch 2026-10-22i] 一直刷新，直到登录成功才冻结（用户可能第一次输错再重输）
+			if (!loggedIn && !__pcCredsLocked) {
 				for (const pg of pagesList) {
 					for (const fr of pg.frames?.() ?? []) {
 						try {
@@ -1062,6 +1065,7 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 					} catch {}
 				}
 				if (loggedIn) log(defaultReportDir(), "登录追踪：检测到登录成功 url=" + okUrl);
+				if (loggedIn) __pcCredsLocked = true;
 			}
 			// 4) 页面集合变了就试一次识别（不要求已登录：有些门户检测不到登录信号，用户点进稿件列表本身就是证据）
 			if (!(structure && structure.plan) && Date.now() - lastTryAt > 1e4) {

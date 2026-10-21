@@ -143,6 +143,9 @@ function PaperCheckerPanel(props: any): any {
         setLoginOk(true)
         setLoginPlan(res.plan ?? null)
         setLoginCreds(res.credentials ?? null)
+        // [patch 2026-10-22i] 把最后一次成功登录用的账号密码预填到可编辑框，加入列表前可确认/改正
+        const c0: any = (res as any).credentials
+        if (c0 && c0.password) { setManualUser(String(c0.username ?? '')); setManualPass(String(c0.password ?? '')) }
         const errLine = res.planError ? '；结构识别未完成: ' + res.planError : ''
         const credLine = (res.credentials && res.credentials.password) ? '；已同步记录账号密码 ✓' : '（本次未记录账号密码——ORCID/SSO 登录没有可记的表单，靠持久化 cookie）'
         // [patch 2026-10-22] 识别失败时把「浏览器里实际看到的页面」列出来：用户才知道自己粘的是统一身份门户还是投稿系统
@@ -179,8 +182,9 @@ function PaperCheckerPanel(props: any): any {
     }
     const name = loginName.trim() || finalUrl.replace(/^https?:\/\//, '').replace(/\/.*$/, '')
     // 自动记录到的凭据优先；已登录站点没有密码表单时用上面手动补录的
-    const uName = String(loginCreds?.username ?? '') || manualUser.trim()
-    const uPass = String(loginCreds?.password ?? '') || manualPass
+    // [patch 2026-10-22i] 手填框优先（默认预填最后一次成功登录的账号密码，用户可改）
+    const uName = manualUser.trim() || String(loginCreds?.username ?? '')
+    const uPass = manualPass || String(loginCreds?.password ?? '')
     journals.push({
       name,
       baseUrl: finalUrl,
@@ -379,25 +383,24 @@ function PaperCheckerPanel(props: any): any {
           }, (p.at != null ? String(p.at) + 's  ' : '') + String(p.url ?? '')),
         )),
       ) : null,
-      loginCreds && loginCreds.password
-        ? React.createElement('div', { style: { fontSize: 11, marginBottom: 6, color: 'var(--dsw-alias-label-secondary, #888)' } },
-            '已同步记录账号密码（' + String(loginCreds.username || '(空)') + '）：存进期刊条目，cookie 过期时可自动重新登录。')
-        : (loginOk ? React.createElement('div', { style: { marginBottom: 6 } },
-            React.createElement('div', { style: s.hint }, '本次没记到账号密码（浏览器已登录时不会出现密码表单，属正常）。想让它记下来就在下面手填一次（可留空）：'),
-            React.createElement('input', {
-              style: { ...s.input, marginTop: 4, marginBottom: 4 },
-              placeholder: '账号 / 邮箱（可选）',
-              value: manualUser,
-              onChange: (e: any) => setManualUser(e.target.value),
-            }),
-            React.createElement('input', {
-              style: s.input,
-              placeholder: '密码（可选，只存在本机插件配置里）',
-              type: 'password',
-              value: manualPass,
-              onChange: (e: any) => setManualPass(e.target.value),
-            }),
-          ) : null),
+      loginOk ? React.createElement('div', { style: { marginBottom: 6 } },
+        React.createElement('div', { style: s.hint }, (loginCreds && loginCreds.password)
+          ? '已同步记录「最后一次成功登录」时用的账号密码（' + String(loginCreds.username || '(空)') + '）。下面可直接修改，加入列表时按这里保存：'
+          : '本次没记到账号密码（浏览器已登录时不会出现密码表单，属正常）。可以在这里手填，加入列表时一起保存：'),
+        React.createElement('input', {
+          style: { ...s.input, marginTop: 4, marginBottom: 4 },
+          placeholder: '账号 / 邮箱',
+          value: manualUser,
+          onChange: (e: any) => setManualUser(e.target.value),
+        }),
+        React.createElement('input', {
+          style: s.input,
+          placeholder: '密码（只存在本机插件配置里）',
+          type: 'password',
+          value: manualPass,
+          onChange: (e: any) => setManualPass(e.target.value),
+        }),
+      ) : null,
       loginOk && !loginPlan ? React.createElement('div', { style: { fontSize: 11, marginBottom: 4, color: 'var(--dsw-alias-label-tertiary, #999)' } }, '结构识别没成功，但仍可先加入列表（抓取时会再试一次识别；也可以回去重新选识别模型后再登录一次）。') : null,
       loginOk ? React.createElement('div', { style: { marginTop: 4, padding: 8, borderRadius: 6, border: '1px solid var(--dsw-alias-border-l1, #ccc)', fontSize: 12 } },
         React.createElement('label', { style: { ...s.label, marginBottom: 2 } }, '期刊名（加入列表时用）'),
