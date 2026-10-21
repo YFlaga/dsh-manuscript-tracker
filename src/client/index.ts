@@ -41,6 +41,9 @@ function PaperCheckerPanel(props: any): any {
   const [loginPlan, setLoginPlan] = React.useState<any>(null)
   // 登录一次时顺手记录到的账号密码（存进期刊条目，cookie 过期可自动重登）
   const [loginCreds, setLoginCreds] = React.useState<any>(null)
+  // 已经登录过（页面直接进后台、没有密码表单）时自动记录拿不到凭据：允许手动补录，跟条目一起保存
+  const [manualUser, setManualUser] = React.useState<string>('')
+  const [manualPass, setManualPass] = React.useState<string>('')
   // 识别模型选择（结构识别用哪个 LLM；默认跟随 DSH 当前默认模型）
   const [modelGroups, setModelGroups] = React.useState<any[]>([])
 
@@ -161,36 +164,63 @@ function PaperCheckerPanel(props: any): any {
     }
     const plan = loginPlan || {}
     const name = loginName.trim() || url.replace(/^https?:\/\//, '').replace(/\/.*$/, '')
+    // 自动记录到的凭据优先；已登录站点没有密码表单时用上面手动补录的
+    const uName = String(loginCreds?.username ?? '') || manualUser.trim()
+    const uPass = String(loginCreds?.password ?? '') || manualPass
     journals.push({
       name,
       baseUrl: url,
-      username: String(loginCreds?.username ?? ''),
-      password: String(loginCreds?.password ?? ''),
+      username: uName,
+      password: uPass,
       sections: Array.isArray(plan.menuSections) ? plan.menuSections : [],
       system: plan.system || 'other',
     })
     setJournalsText(JSON.stringify(journals, null, 2))
     setLoginName('')
     setLoginPlan(null)
-    setLoginMsg('已加入期刊列表，记得点下方「保存」生效')
+    setManualUser('')
+    setManualPass('')
+    setLoginMsg('已加入期刊列表' + (uPass ? '（已记录账号密码 ✓）' : '（未记录账号密码，只靠持久化 cookie）') + '，记得点下方「保存」生效')
+  }
+
+  // 列表操作（删除/清空/排序）立刻落盘：以前只改本地 JSON 缓冲区，必须再点一次「保存」，
+  // 用户看到的就成了"删了又回来"（加上 GET 的旧值覆盖）。这里直接写设置，失败只提示、不回滚输入。
+  const saveJournalsNow = async (next: any[], note: string) => {
+    setJournalsText(JSON.stringify(next, null, 2))
+    if (!cfg) return
+    setSaving(true)
+    try {
+      const res = await fetchJson('/config', {
+        method: 'POST',
+        body: JSON.stringify({ config: { ...cfg, journals: next }, expectedRevision: revision }),
+      })
+      if (res.ok) {
+        setRevision(res.revision ?? revision + 1)
+        setMsg(note + ' ✓（已自动保存）')
+      } else {
+        setMsg(note + '，但自动保存失败: ' + (res.error ?? '未知错误') + '——请点下方「保存」重试')
+      }
+    } catch (e) {
+      setMsg(note + '，但自动保存异常: ' + String(e) + '——请点下方「保存」重试')
+    } finally {
+      setSaving(false)
+    }
   }
 
   const removeJournal = (idx: number) => {
     const next = journalItems.slice()
     const removed = next[idx]
     next.splice(idx, 1)
-    setJournalsText(JSON.stringify(next, null, 2))
     setConfirmDel(-1)
-    setMsg('已移除「' + String(removed?.name ?? '') + '」，点「保存」生效')
+    void saveJournalsNow(next, '已移除「' + String(removed?.name ?? '') + '」')
   }
 
   // ---- 顺序调整 / 清空 / 单独检查一本 ----
   const [confirmClear, setConfirmClear] = React.useState<boolean>(false)
   const [runningOne, setRunningOne] = React.useState<number>(-1)
   const clearJournals = () => {
-    setJournalsText('[]')
     setConfirmClear(false)
-    setMsg('已清空期刊列表，点「保存」生效')
+    void saveJournalsNow([], '已清空期刊列表')
   }
   const moveJournal = (idx: number, dir: number) => {
     const next = journalItems.slice()
@@ -199,9 +229,8 @@ function PaperCheckerPanel(props: any): any {
     const tmp = next[idx]
     next[idx] = next[to]
     next[to] = tmp
-    setJournalsText(JSON.stringify(next, null, 2))
     setConfirmDel(-1)
-    setMsg('已' + (dir < 0 ? '上移' : '下移') + '，点「保存」生效')
+    void saveJournalsNow(next, '已' + (dir < 0 ? '上移' : '下移'))
   }
   const checkOne = async (idx: number) => {
     const one = journalItems[idx]
@@ -310,7 +339,22 @@ function PaperCheckerPanel(props: any): any {
       loginCreds && loginCreds.password
         ? React.createElement('div', { style: { fontSize: 11, marginBottom: 6, color: 'var(--dsw-alias-label-secondary, #888)' } },
             '已同步记录账号密码（' + String(loginCreds.username || '(空)') + '）：存进期刊条目，cookie 过期时可自动重新登录。')
-        : null,
+        : (loginOk ? React.createElement('div', { style: { marginBottom: 6 } },
+            React.createElement('div', { style: s.hint }, '本次没记到账号密码（浏览器已登录时不会出现密码表单，属正常）。想让它记下来就在下面手填一次（可留空）：'),
+            React.createElement('input', {
+              style: { ...s.input, marginTop: 4, marginBottom: 4 },
+              placeholder: '账号 / 邮箱（可选）',
+              value: manualUser,
+              onChange: (e: any) => setManualUser(e.target.value),
+            }),
+            React.createElement('input', {
+              style: s.input,
+              placeholder: '密码（可选，只存在本机插件配置里）',
+              type: 'password',
+              value: manualPass,
+              onChange: (e: any) => setManualPass(e.target.value),
+            }),
+          ) : null),
       loginPlan ? React.createElement('div', { style: { marginTop: 4, padding: 8, borderRadius: 6, border: '1px solid var(--dsw-alias-border-l1, #ccc)', fontSize: 12 } },
         React.createElement('label', { style: { ...s.label, marginBottom: 2 } }, '期刊名（加入列表时用）'),
         React.createElement('input', {
@@ -351,6 +395,7 @@ function PaperCheckerPanel(props: any): any {
                       (j2?.name || '(未命名)') + (j2?.system === 'editorial-manager' ? ' · 确定性抓取' : ' · 结构抓取')),
                     React.createElement('div', { style: { ...s.hint, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
                       String(j2?.baseUrl ?? '') +
+                        (j2?.password ? ' · 已存账号密码' : ' · 仅 cookie') +
                         ' · 分区 ' + (Array.isArray(j2?.sections) ? j2.sections.length : 0) + ' 个' +
                         (j2?.structure && Array.isArray(j2.structure.sections) && j2.structure.sections.length ? ' · 结构 ' + j2.structure.sections.length + ' 项' : '')),
                   ),

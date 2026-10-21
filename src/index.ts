@@ -1193,7 +1193,7 @@ async function pcRecognizeStructure(opts: {
         notes: ((plan?.notes ? plan.notes + '；' : '') + '检测到 EM 主菜单/域名特征，按 Editorial Manager 处理'),
       }, baseUrl)
     }
-    if (!plan) return { error: '结构识别失败: ' + (llmErr || '模型返回为空') }
+    if (!plan) return { error: '结构识别失败: ' + (llmErr || ('模型返回为空（' + provider + (model ? ' / ' + model : '') + '），可在配置页换一个识别模型再试')) }
     const planPath = pcStructurePath(baseUrl)
     writeFileSync(planPath, JSON.stringify({
       baseUrl,
@@ -1799,22 +1799,58 @@ function fallbackSessionTitle(session: any): string {
  * 从设置命名空间重算 provider/模型列表：DSH 0.2 客户端已不再暴露 connection.api.llm.models。
  * 命名空间名（如 llm-deepseek-account）不是 provider id，只有与 agent-default-model 一致的才用真实 id 标注。
  * 其余不猜——错的 id 下发只会让「模型识别」静默失败。 */
-function buildModelGroupsPC(settingsService: any): any[] {
+async function buildModelGroupsPC(llmService: any, settingsService: any): Promise<any[]> {
   const out: any[] = []
   const seen = new Set<string>()
-  const push = (id: string, name: string, models: any[]) => {
-    if (!id || seen.has(id) || !models.length) return
-    seen.add(id)
-    out.push({ id, name: name || id, models: models.map((m: any) => ({ id: m?.id ?? String(m), name: m?.name ?? m?.id ?? String(m) })) })
-  }
+  let defProvider = ''
+  let defModel = ''
   try {
-    let defProvider = ''
-    let defModel = ''
-    try {
-      const dm = settingsService?.get?.('agent-default-model')
-      defProvider = dm?.provider ?? ''
-      defModel = dm?.model ?? ''
-    } catch { /* 忽略 */ }
+    const dm = settingsService?.get?.('agent-default-model')
+    defProvider = dm?.provider ?? ''
+    defModel = dm?.model ?? ''
+  } catch { /* 忽略 */ }
+  const push = (id: string, name: string, models: any[]) => {
+    if (!id || seen.has(id)) return
+    seen.add(id)
+    out.push({
+      id,
+      name: name || id,
+      // 目录为空也要保留 provider：面板模型下拉有「识别模型（默认）」兜底，选空即用该 provider 的第一个模型
+      models: (models ?? []).map((m: any) => ({ id: String(m?.id ?? m ?? ''), name: String(m?.name ?? m?.id ?? m ?? '') })).filter((m: any) => !!m.id),
+    })
+  }
+  // 1) 真源：LLM 运行时注册表 listProviders()/listModels()。官方 DeepSeek 账号（provider id = deepseek-account）
+  //    这类内置 provider 只存在于运行时，settings 里根本查不到 → 早先只扫 settings 才会出现"下拉里没有官方账号"。
+  try {
+    const provs = typeof llmService?.listProviders === 'function' ? llmService.listProviders() : []
+    for (const p of provs ?? []) {
+      const id = String(p?.id ?? p?.provider ?? '')
+      if (!id) continue
+      let models: any[] = []
+      try {
+        const list = await llmService.listModels(id)
+        models = Array.isArray(list) ? list : []
+      } catch { /* 该 provider 没有模型目录：留给后面的目录/设置补齐 */ }
+      push(id, String(p?.name ?? p?.displayName ?? p?.label ?? id), models)
+    }
+  } catch { /* 静默 */ }
+  // 1b) 可配置 provider 目录（未激活也有声明）。settingsNs ≠ provider id：例如 settingsNs 是 'llm-deepseek-account'、
+  //     真正的 provider 是 'deepseek-account'。把设置命名空间当 provider id 下发出去，正是识别静默失败（空输出）的根因。
+  try {
+    const dir = typeof llmService?.listConfigurableProviders === 'function' ? llmService.listConfigurableProviders() : []
+    for (const e of dir ?? []) {
+      const id = String(e?.provider ?? e?.id ?? '')
+      if (!id) continue
+      let models: any[] = []
+      try {
+        const list = await llmService.listModels(id)
+        models = Array.isArray(list) ? list : []
+      } catch { /* 未激活时没有目录 */ }
+      push(id, String(e?.displayName ?? e?.name ?? id), models)
+    }
+  } catch { /* 静默 */ }
+  // 2) 设置里声明的 providers（部分可配置 provider 只在设置里声明）
+  try {
     const rows = typeof settingsService?.describe === 'function' ? settingsService.describe() : []
     for (const d of rows ?? []) {
       const v = d?.value
@@ -1835,14 +1871,34 @@ function buildModelGroupsPC(settingsService: any): any[] {
       if (defModel && defProvider && ids.includes(defModel)) push(defProvider, defProvider, v.models)
       else if (!defModel) push(d.ns, d.ns, v.models)
     }
-    if (defProvider) {
-      const i = out.findIndex((g) => g.id === defProvider)
-      if (i > 0) out.unshift(out.splice(i, 1)[0])
-    }
   } catch { /* 静默 */ }
+  // 3) 兜底：默认 provider 至少出现在下拉里，否则面板只剩"默认"一项
+  if (defProvider && !seen.has(defProvider)) push(defProvider, defProvider, defModel ? [{ id: defModel, name: defModel }] : [])
+  if (defProvider) {
+    const i = out.findIndex((g) => g.id === defProvider)
+    if (i > 0) out.unshift(out.splice(i, 1)[0])
+  }
   return out
 }
 
+/** provider id 是否真的可用：运行时注册表 + 可配置目录（settingsNs 不算）。 */
+function pcValidProviderPC(llmService: any, id: string, settingsService?: any): boolean {
+  const want = String(id ?? '')
+  if (!want) return false
+  try {
+    const provs = typeof llmService?.listProviders === 'function' ? llmService.listProviders() : []
+    if ((provs ?? []).some((p: any) => String(p?.id ?? p?.provider ?? '') === want)) return true
+    const dir = typeof llmService?.listConfigurableProviders === 'function' ? llmService.listConfigurableProviders() : []
+    if ((dir ?? []).some((e: any) => String(e?.provider ?? e?.id ?? '') === want)) return true
+    // pi-ai 这类可配置 provider：没激活时不在运行时注册表里，但设置在 providers 里声明过，用户选它是合法的
+    const rows = typeof settingsService?.describe === 'function' ? settingsService.describe() : []
+    for (const d of rows ?? []) {
+      const provs2 = d?.value?.providers
+      if (provs2 && typeof provs2 === 'object' && Object.prototype.hasOwnProperty.call(provs2, want)) return true
+    }
+    return false
+  } catch { return false }
+}
 /** 从会话索引读取 cwd（冷会话未载入，sessions.get() 给不出 cwd）。 */
 function cwdFromIndexPC(sessionId: string): string {
   try {
@@ -2011,6 +2067,10 @@ async function callLlmText(llmService: any, settingsService: any, prompt: string
       for await (const chunk of stream) {
         if (chunk?.type === 'text-delta' && chunk.text) out.push(chunk.text)
       }
+    } catch (e) {
+      // 以前这里只有 finally，异常被上层吞成「模型没有返回 JSON: 」；把 provider/model 和真实原因带出去
+      const msg = String((e as any)?.message ?? e).split('\n')[0]
+      throw new Error('模型调用失败（' + provider + (model ? ' / ' + model : '') + '）：' + msg.slice(0, 300))
     } finally {
       clearTimeout(timer)
     }
@@ -2124,11 +2184,20 @@ export function apply(ctx: AppContext, config: Config): void {
   // provider/model 复用面板上的「识别用模型」（discoverProvider / discoverModel）。
   const pcScrapeEnv = (cfg?: Config): ScrapeEnv => {
     const c = cfg ?? getConfig()
+    let providerOverride = c.discoverProvider || undefined
+    let modelOverride = c.discoverModel || undefined
+    // provider 不在运行时注册表里就别往下透传：llm.stream 会静默吐空文本，
+    // 面板最后只看到「模型没有返回 JSON: 」这种没法排查的错。这里回退到 agent-default-model。
+    if (providerOverride && !pcValidProviderPC(ctx.llm, providerOverride, settingsService)) {
+      try { log(reportDir(), '识别 provider 未注册，回退默认模型: ' + String(providerOverride)) } catch { /* 静默 */ }
+      providerOverride = undefined
+      modelOverride = undefined
+    }
     return {
       llmService: ctx.llm,
       settingsService,
-      providerOverride: c.discoverProvider || undefined,
-      modelOverride: c.discoverModel || undefined,
+      providerOverride,
+      modelOverride,
     }
   }
 
@@ -2146,14 +2215,35 @@ export function apply(ctx: AppContext, config: Config): void {
         if (req.method === 'GET' && p === '/config') {
           if (!settingsService?.describe) return send(500, { ok: false, error: 'settings 服务不可用' })
           const desc = settingsService.describe().find((d: any) => d.ns === 'paper-checker')
+          const modelGroups = await (async () => { try { return await buildModelGroupsPC(ctx.llm, settingsService) } catch { return [] } })()
+          const baseCfg: any = { ...(desc?.value ?? getConfig()) }
+          // 落盘值只补「运行态缺失」的字段。早期实现是整体覆盖，结果面板里刚删掉的期刊会在下次 GET 时
+          // 被 cordis.patch.yml 里的旧快照盖回来——用户看到的"删除期刊失效"就是这么来的。
+          try {
+            const pp = readPersistedPC()
+            if (pp && typeof pp === 'object') for (const k of Object.keys(pp)) {
+              const cur = baseCfg[k]
+              const missing = cur === undefined || cur === null || cur === '' || (Array.isArray(cur) && cur.length === 0)
+              if (missing) baseCfg[k] = pp[k]
+            }
+          } catch { /* 落盘读取失败不影响主流程 */ }
+          // 历史配置里可能存着无效 provider（被当成 provider id 的设置命名空间名）：显示为空，回退默认模型
+          if (baseCfg.discoverProvider && !pcValidProviderPC(ctx.llm, baseCfg.discoverProvider, settingsService)) {
+            baseCfg.discoverProvider = ''
+            baseCfg.discoverModel = ''
+          } else if (baseCfg.discoverProvider) {
+            const g = modelGroups.find((x: any) => x.id === baseCfg.discoverProvider)
+            const ids = new Set(((g && g.models) || []).map((m: any) => String(m.id)))
+            if (baseCfg.discoverModel && ids.size > 0 && !ids.has(String(baseCfg.discoverModel))) baseCfg.discoverModel = ''
+          }
           return send(200, {
             ok: true,
-            config: desc?.value ?? getConfig(),
+            config: baseCfg,
             revision: desc?.revision ?? 0,
             // 面板要的会话列表、provider/模型列表统一由 /config 下发：客户端 0.2 拿不到
             // llm.models，sessions 路径在渲染进程里也会静默失败。
             sessions: (() => { try { return listAllSessionsPC(ctx.agents, ctx.sessions, sessionTitleService) } catch { return [] } })(),
-            modelGroups: (() => { try { return buildModelGroupsPC(settingsService) } catch { return [] } })(),
+            modelGroups,
           })
         }
         if (req.method === 'GET' && p === '/sessions') {
