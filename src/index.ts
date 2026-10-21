@@ -92,7 +92,7 @@ export const Config = z.object({
 
 // DSH 0.2 的设置服务只看 schema 的 meta.volatile 才允许写入配置（dsh-settings 的
 // volatileForm()/isVolatilePath() 读 schema.meta.volatile），否则面板保存会报
-// `Plugin entry "paper-checker" has no volatile fields`。
+// `Plugin entry "manuscript-tracker" has no volatile fields`。
 // 这里直接标 meta 并用 try/catch 兜住：schemastery 的 .volatile() 返回克隆、且旧版本没有该方法。
 try {
   const schemaMeta = (Config as any).meta
@@ -204,7 +204,7 @@ const zh = (s: string): string => {
 
 // ============ 工具函数 ============
 function defaultReportDir(): string {
-  return join(homedir(), '.dsh', 'paper-checker', 'reports')
+  return join(homedir(), '.dsh', 'manuscript-tracker', 'reports')
 }
 
 function log(reportDir: string, msg: string): void {
@@ -408,7 +408,7 @@ function readPersistedPC() {
     for (const c of cands) {
       try {
         const text = readFileSync(c.p, "utf8");
-        if (!text.includes("paper-checker")) continue;
+        if (!text.includes("manuscript-tracker")) continue;
         const doc = __pcYaml(text);
         const arr = Array.isArray(doc) ? doc : (doc && typeof doc === "object" ? Object.values(doc)[0] : null);
         const list = Array.isArray(arr) ? arr : [];
@@ -674,7 +674,7 @@ const PC_LOGIN_TIMEOUT_MS = 10 * 60 * 1000
 
 /** 持久化 profile 目录（自动创建）。 */
 function pcProfileDir(): string {
-  const dir = join(homedir(), '.dsh', 'paper-checker', 'browser-profile')
+  const dir = join(homedir(), '.dsh', 'manuscript-tracker', 'browser-profile')
   try { mkdirSync(dir, { recursive: true }) } catch { /* 静默 */ }
   return dir
 }
@@ -1196,7 +1196,7 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 
 // ============ 第二步：登录后结构识别 + 通用抓取器 ============
 // 思路：人工登录一次拿到持久化登录态后，立刻把「登录态可见」的页面结构摘要交给 LLM 判型，
-// 记住投稿列表页与字段选择器，写到 ~/.dsh/paper-checker/structures/<site>.json（独立文件，不动期刊 schema）。
+// 记住投稿列表页与字段选择器，写到 ~/.dsh/manuscript-tracker/structures/<site>.json（独立文件，不动期刊 schema）。
 // 抓取时先看这份 plan：EM 或没有 plan → 走 EM 逻辑（行为不变）；其他系统 → 通用抓取器（DOM 优先，0 条回退 LLM）。
 /** 通用抓取器需要的运行时依赖（LLM 通道 + 可选覆盖模型）。 */
 type ScrapeEnv = { llmService?: any; settingsService?: any; providerOverride?: string; modelOverride?: string }
@@ -1224,7 +1224,7 @@ function pcSystemLabel(s: string): string { return PC_SYSTEM_LABEL[String(s ?? '
 const PC_LIST_HINT_RE = /submissions?|manuscripts?|my submissions|author dashboard|dashboard|submission status/i
 
 function pcStructuresDir(): string {
-  const dir = join(homedir(), '.dsh', 'paper-checker', 'structures')
+  const dir = join(homedir(), '.dsh', 'manuscript-tracker', 'structures')
   try { mkdirSync(dir, { recursive: true }) } catch { /* 静默 */ }
   return dir
 }
@@ -1977,7 +1977,7 @@ function formatReport(results: JournalResult[], dateStr: string, endedMonths: nu
     }
     // 通用抓取器成功时 system 可能是 'other'/sNAPP 等；只有「没有抓取结果」才走人工兜底提示
     if (r.system === 'other' && !(r.sections ?? []).length) {
-      lines.push('- 需 AI 手动检查（非 Editorial Manager，请用浏览器工具或 check_paper_status 交互式处理）')
+      lines.push('- 需 AI 手动检查（非 Editorial Manager，请用浏览器工具或 check_manuscript_status 交互式处理）')
       continue
     }
     const sections = r.sections ?? []
@@ -2349,7 +2349,7 @@ async function reportToSession(agents: any, sessions: any, sessionId: string, re
   try {
     const __sc0: any = (__pcSCRef as any) || ((__pcCtx && typeof (__pcCtx as any).get === "function") ? (__pcCtx as any).get("sessionController") : null)
     if (__sc0 && typeof __sc0.prompt === "function" && sessionId) {
-      await __sc0.prompt({ sessionId, content: [{ type: "text", text: "\u23f0 \u6bcf\u65e5\u6295\u7a3f\u72b6\u6001\u81ea\u52a8\u6c47\u62a5\uff08\u63d2\u4ef6 dsh-paper-checker\uff09\uff1a\n\n" + report + "\n\n\u2014\u2014\u8bf7\u4e00\u53e5\u8bdd\u786e\u8ba4\u6536\u5230\u5373\u53ef\uff0c\u4e0d\u8981\u91cd\u65b0\u68c0\u67e5\u3001\u4e0d\u8981\u8c03\u7528\u5de5\u5177\u3002" }] }, { kind: "user" })
+      await __sc0.prompt({ sessionId, content: [{ type: "text", text: "\u23f0 \u6bcf\u65e5\u6295\u7a3f\u72b6\u6001\u81ea\u52a8\u6c47\u62a5\uff08\u63d2\u4ef6 dsh-manuscript-tracker\uff09\uff1a\n\n" + report + "\n\n\u2014\u2014\u8bf7\u4e00\u53e5\u8bdd\u786e\u8ba4\u6536\u5230\u5373\u53ef\uff0c\u4e0d\u8981\u91cd\u65b0\u68c0\u67e5\u3001\u4e0d\u8981\u8c03\u7528\u5de5\u5177\u3002" }] }, { kind: "user" })
       return "ok"
     }
   } catch (e) {
@@ -2552,7 +2552,7 @@ export function apply(ctx: AppContext, config: Config): void {
     } catch (e) { return base }
   }
   const getConfig = (): Config => getConfigMerged()
-  installSettingsSection(ctx, 'paper-checker', Config, config, {
+  installSettingsSection(ctx, 'manuscript-tracker', Config, config, {
     setSource: (fn: any) => { getConfigRaw = fn as () => Config },
     onChange: () => {},
   })
@@ -2564,7 +2564,7 @@ export function apply(ctx: AppContext, config: Config): void {
   try { __pcSessionsRef = ctx.sessions } catch {}
   mkdirSync(reportDir(), { recursive: true })
 
-  // 自定义配置 API：绕开 apiproxy 的 settings 白名单（paper-checker 不在 WEB_SETTINGS_NAMESPACES，
+  // 自定义配置 API：绕开 apiproxy 的 settings 白名单（manuscript-tracker 不在 WEB_SETTINGS_NAMESPACES，
   // 所以 describe/mutate 会被 notExposed 拦截），改由 webServer 直连 host 内部 settings 服务。
   let settingsService: any = null
   ctx.inject(['settings'], (sctx: any) => { settingsService = sctx.settings })
@@ -2594,7 +2594,7 @@ export function apply(ctx: AppContext, config: Config): void {
 
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
-    path: '/paper-checker/api',
+    path: '/manuscript-tracker/api',
     handler: async (req: any, res: any) => {
       const send = (code: number, obj: any) => {
         res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' })
@@ -2602,10 +2602,10 @@ export function apply(ctx: AppContext, config: Config): void {
       }
       try {
         const url = new URL(req.url ?? '/', 'http://localhost')
-        const p = url.pathname.replace(/^\/paper-checker\/api/, '') || '/'
+        const p = url.pathname.replace(/^\/manuscript-tracker\/api/, '') || '/'
         if (req.method === 'GET' && p === '/config') {
           if (!settingsService?.describe) return send(500, { ok: false, error: 'settings 服务不可用' })
-          const desc = settingsService.describe().find((d: any) => d.ns === 'paper-checker')
+          const desc = settingsService.describe().find((d: any) => d.ns === 'manuscript-tracker')
           const modelGroups = await (async () => { try { return await buildModelGroupsPC(ctx.llm, settingsService) } catch { return [] } })()
           const baseCfg: any = { ...(desc?.value ?? getConfig()) }
           // 落盘值只补「运行态缺失」的字段。早期实现是整体覆盖，结果面板里刚删掉的期刊会在下次 GET 时
@@ -2648,8 +2648,8 @@ export function apply(ctx: AppContext, config: Config): void {
           // DSH 的 mutate 是**字段级编辑**（docs: ordered form edits）——单个根 op（path: []）会被静默丢弃，
           // 表现是返回 ok、revision 递增、值不变。这里改为逐字段 op。
           const opsPC = Object.keys(value ?? {}).map((k: string) => ({ op: 'set', path: [k], value: (value as any)[k] }))
-          await settingsService.mutate('paper-checker', opsPC.length ? opsPC : [{ op: 'set', path: [], value }], expectedRevision)
-          const desc = settingsService.describe().find((d: any) => d.ns === 'paper-checker')
+          await settingsService.mutate('manuscript-tracker', opsPC.length ? opsPC : [{ op: 'set', path: [], value }], expectedRevision)
+          const desc = settingsService.describe().find((d: any) => d.ns === 'manuscript-tracker')
           // 写后回读校验：DSH 的写入是字段级 volatile 判定，非 volatile 字段会被静默丢弃。
           // 这里逐字段比对（journals 的 schema 会补默认值而跳过深比），不一致就报错，避免假成功。
           const afterValue: any = (desc?.value ?? {}) as any
@@ -2710,7 +2710,7 @@ export function apply(ctx: AppContext, config: Config): void {
           return send(200, { ok: true, report: reportOne, single: true, deliver: deliverOne })
         }
         // 人工登录一次（B 方案）：用共享 profile 打开有头浏览器，用户自己完成 ORCID / 学校 SSO 登录。
-        // 登录态落到 ~/.dsh/paper-checker/browser-profile，之后的无头抓取直接复用 cookie。
+        // 登录态落到 ~/.dsh/manuscript-tracker/browser-profile，之后的无头抓取直接复用 cookie。
         // 登录成功后顺手把页面结构交给模型识别（投稿系统 / 列表入口 / 字段选择器），落盘 structures/<key>.json。
         if (req.method === 'POST' && p === '/login-once') {
           const body = JSON.parse(await readBody(req))
@@ -2791,11 +2791,11 @@ export function apply(ctx: AppContext, config: Config): void {
         return send(500, { ok: false, error: String(e?.message ?? e) })
       }
     },
-  }), 'paper-checker: config api')
+  }), 'manuscript-tracker: config api')
 
   // 工具：按需检查
   const disposeTool = ctx.tools.register(defineTool({
-    name: 'check_paper_status',
+    name: 'check_manuscript_status',
     description: '检查配置的学术期刊投稿审稿状态（Editorial Manager 期刊确定性抓取；其他系统返回回退信号，请改用浏览器工具手动检查）',
     parameters: {
       journal_name: { type: 'string', description: '可选：只检查指定期刊名；缺省检查全部配置期刊' },
@@ -2817,7 +2817,7 @@ export function apply(ctx: AppContext, config: Config): void {
     },
     presentCall: (args: any) => ({ card: 'generic', title: '检查投稿状态', kind: 'read', rawInput: args.journal_name ?? '' }),
   }))
-  ctx.effect(() => disposeTool, 'paper-checker: tool')
+  ctx.effect(() => disposeTool, 'manuscript-tracker: tool')
 
   // 守护定时：每天到点自动检查（配置变化后下一 tick 自动用新值）。
   // 触发条件：当天还没跑过，且当前时刻已到目标时间——DSH 在目标时刻未运行(关机/休眠/晚启动)时，启动后自动补跑当天检查。

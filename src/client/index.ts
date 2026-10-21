@@ -1,7 +1,7 @@
 /**
  * @dsh-external/dsh-manuscript-tracker — client 配置面板（plugins.bundle.config）。
  * 注册在侧栏「插件」页里本 bundle 的详情页上（描述与行列表之间），可视化编辑定时配置 + 期刊列表。
- * 配置读写走插件自建 HTTP API（/paper-checker/api），绕过 apiproxy 的 settings 白名单。
+ * 配置读写走插件自建 HTTP API（/manuscript-tracker/api），绕过 apiproxy 的 settings 白名单。
  */
 import * as React from 'react'
 
@@ -12,7 +12,7 @@ type ClientContext = {
 
 export const inject = ['slots']
 
-const API = '/paper-checker/api'
+const API = '/manuscript-tracker/api'
 
 function fetchJson(path: string, init?: any): Promise<any> {
   return fetch(API + path, {
@@ -516,5 +516,5 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
     name: 'plugins.bundle.config',
     key: '@dsh-external/dsh-manuscript-tracker',
-  }, (props: any) => (props?.view === 'summary' ? null : React.createElement(PaperCheckerPanel, props)))), 'paper-checker: bundle config')
+  }, (props: any) => (props?.view === 'summary' ? null : React.createElement(PaperCheckerPanel, props)))), 'manuscript-tracker: bundle config')
 }
