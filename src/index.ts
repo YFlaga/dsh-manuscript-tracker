@@ -2497,9 +2497,21 @@ async function analyzeJournalMenu(llmService: any, settingsService: any, baseUrl
 // ============ 插件入口 ============
 export function apply(ctx: AppContext, config: Config): void {
   // settings 化：配置可运行时读写 + 持久化到 settings.yaml（UI 可编辑）
-  let getConfig: () => Config = () => config
+  let getConfigRaw: () => Config = () => config
+  // [patch 2026-10-22p] 配置热更新：所有运行时读取都合并落盘的 cordis.patch.yml，
+  // 所以面板保存后立刻用新配置，无需重启 DSH。
+  const getConfigMerged = (): Config => {
+    const base = getConfigRaw()
+    try {
+      const p = readPersistedPC()
+      if (!p) return base
+      const merged: any = { ...(base as any), ...p }
+      try { return Config(merged) as any } catch (e) { return merged as Config }
+    } catch (e) { return base }
+  }
+  const getConfig = (): Config => getConfigMerged()
   installSettingsSection(ctx, 'paper-checker', Config, config, {
-    setSource: (fn: any) => { getConfig = fn as () => Config },
+    setSource: (fn: any) => { getConfigRaw = fn as () => Config },
     onChange: () => {},
   })
 
