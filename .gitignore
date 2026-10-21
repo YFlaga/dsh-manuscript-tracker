@@ -2,3 +2,5 @@ node_modules/
 lib/*.map
 *.tsbuildinfo
 *.tgz
+__*.cjs
+__*.mjs
