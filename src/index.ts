@@ -2,21 +2,21 @@
  * @dsh-external/dsh-paper-checker
  * 检查学术期刊投稿审稿状态并定时汇报。
  * - Editorial Manager 期刊：内置确定性 Playwright 抓取（Playwright 内置 Chromium，无头）
- * - 其他投稿系统（system='other'）：回退信号，交由 AI 用浏览器工具处理
- * - 守护定时：每天到点自动检查 → 写报告 → 推微信（Server酱）
+ * - 其他投稿系统（system='other'）：回退信号，交给 AI 用浏览器工具处理
+ * - 守护定时：每天到点自动检查、写报告、推微信（Server酱）
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import https from 'node:https'
 import { createRequire } from 'node:module'
-// 用 createRequire(import.meta.url) 强制标准 Node 解析 playwright-core（命中插件 node_modules，
-// 绕开 DSH 宿主对动态 import 的自定义解析——后者会解析到错误的 playwright-core 副本）
+// 用 createRequire(import.meta.url) 强制标准 Node 解析 playwright-core（命中插件 node_modules），
+// 绕开 DSH 宿主对动态 import 的自定义解析——后者会解析到错误的 playwright-core 副本。
 const pwRequire = createRequire(import.meta.url)
 
 type AppContext = Context & {
@@ -86,7 +86,7 @@ export const Config = z.object({
   browserPath: z.string().default(''),
 })
 
-// DSH 0.2 的设置服务只在 schema 带 meta.volatile 时允许写入配置（dsh-settings 的
+// DSH 0.2 的设置服务只看 schema 的 meta.volatile 才允许写入配置（dsh-settings 的
 // volatileForm()/isVolatilePath() 读 schema.meta.volatile），否则面板保存会报
 // `Plugin entry "paper-checker" has no volatile fields`。
 // 这里直接标 meta 并用 try/catch 兜住：schemastery 的 .volatile() 返回克隆、且旧版本没有该方法。
@@ -95,8 +95,8 @@ try {
   if (schemaMeta) schemaMeta.volatile = true
 
 // [关键] DSH 的写入是按**字段路径**判断 volatile 的（docs: "Edit fields that plugins declare with .volatile()"）。
-// 只标根节点会让命名空间看起来可写（保存不再报错），但字段级写入会被判定为非 volatile 而静默丢弃——
-// 表现为"保存返回 ok、revision 递增，值却没变"。所以递归把每个子 schema 也标上。
+// 只标根节点会让命名空间看起来可写（保存不再报错），但字段级写入会被判定为「非 volatile」而静默丢弃——
+// 表现是「保存返回 ok、revision 递增，值却没变」。所以递归把每个子 schema 也标上。
 const __pcSeenSchema = new Set<any>()
 const markVolatilePC = (s: any, depth = 0): void => {
   try {
@@ -228,9 +228,8 @@ function nowInTz(timezone: string): { date: string; time: string } {
 
 // ============ Editorial Manager 确定性抓取 ============
 /**
- * 等 EM 把登录页载入 iframe。不再只认 name=content：遍历所有子 frame，谁先出现 login.asp
- * 或 username 输入框就用谁（各期刊实例的命名与填充时机并不一致，且偶发长时间停在 about:blank）。
- */
+ * EM 把登录页载入 iframe。不再只认 name=content：遍历所有子 frame，谁先出现 login.asp
+ * 且带 username 输入框的就用谁（各期刊实例的命名与填充时机并不一致，且偶发长时间停在 about:blank）。 */
 async function waitForFrame(page: any, budgetMs = 45000): Promise<any | null> {
   const deadline = Date.now() + budgetMs
   let fallback: any = null
@@ -285,8 +284,8 @@ function __pcAgents() {
 
 async function __pcLoadSession(sessionId: any, cwd: any) {
   try {
-    // [local patch] cwd 为空会让宿主 ensureSession 执行 mkdir "" → ENOENT（实测错误原文）。
-    // 依次回退：会话 header → workspace 记录里的路径 → 进程当前目录。__pcCwdFallback
+    // [local patch] cwd 为空会让宿主 ensureSession 执行 mkdir "" 而 ENOENT（实测错误原文）。
+    // 依次回退：会话 header 的、workspace 记录里的路径、进程当前目录。__pcCwdFallback
     if (!cwd) {
       try { const s = (__pcCtx.sessions && __pcCtx.sessions.get) ? __pcCtx.sessions.get(sessionId) : null; cwd = (s && s.header && s.header.cwd) || ""; } catch (e: any) { /* ignore */ }
     }
@@ -386,7 +385,7 @@ function ctxAgentsGet(sessionId: any) {
 function __pcBuildMsg(report: any) {
   try {
     return createUserMessage({
-      content: [{ type: "text", text: "⏰ 每日投稿状态自动汇报（插件 dsh-paper-checker）：\n\n" + report + "\n\n——请一句话确认收到即可，不要重新检查、不要调用工具。" }],
+      content: [{ type: "text", text: "📊 每日投稿状态自动汇报（插件 dsh-paper-checker）：\n\n" + report + "\n\n——请一句话确认收到即可，不要重新检查、不要调用工具。" }],
       source: { kind: "user" }
     });
   } catch (e: any) { return report; }
@@ -400,7 +399,7 @@ function readPersistedPC() {
       const p = join(root, prof, "cordis.patch.yml");
       try { if (existsSync(p)) cands.push({ p, m: statSync(p).mtimeMs }); } catch (e: any) { /* ignore */ }
     }
-    // 关键：DSH 只写当前 profile 的那份，取 mtime 最新的，避免读到其它/旧 profile 的值
+    // 关键：DSH 只写当前 profile 的那份，所以取 mtime 最新的，避免读到其他 profile 的。
     cands.sort((a: any, b: any) => b.m - a.m);
     for (const c of cands) {
       try {
@@ -411,7 +410,7 @@ function readPersistedPC() {
         const list = Array.isArray(arr) ? arr : [];
         const entry = list.find((x: any) => x && x.name === "@dsh-external/dsh-paper-checker") || list.find((x: any) => x && x.config);
         if (entry && entry.config) return entry.config;
-      } catch (e: any) { /* 试下一份 */ }
+      } catch (e: any) { /* 试下一个 */ }
     }
   } catch (e: any) { /* ignore */ }
   return null;
@@ -475,11 +474,10 @@ function __pcScalar(v: any) {
 
 /**
  * 打开期刊登录页并把登录帧准备到可见状态，失败自动重试。
- * 加固：EM 靠页面自身 JS 把登录页填进 content iframe，这一步在插件进程里实测可能一直不发生
+ * 加固：EM 靠页面自己的 JS 把登录页填进 content iframe，这一步在插件进程里实测可能一直不发生
  * （三次尝试共 90 多秒都停在 about:blank，而同机独立进程 2 秒就绪）。所以不再依赖那段 JS：
  * 等很短时间没动静，就自己把 iframe 的 src 指到 <base>/login.asp（登录表单本来就在这个地址）。
- * 另外挂一次诊断监听，把 playwright-core 位置、浏览器版本、失败请求与页面错误带进报错。
- */
+ * 另外挂一次诊断监听，把 playwright-core 位置、浏览器版本、失败请求与页面错误带进报错。 */
 async function openLoginFrame(page: any, baseUrl: string, dbg: string[], attempts = 3): Promise<any | null> {
   try {
     if (!page.__pcDiag) {
@@ -566,7 +564,7 @@ async function parseTable(frame: any): Promise<{ headers: string[]; rows: string
     }).catch(() => false)
     if (found) {
       return frame.evaluate(() => {
-        // 兼容两种 EM 结构：标准 #datatable（thead 表头）/ Grid 表格（表头在 tbody 第一行的 th）
+        // 兼容两种 EM 结构：标准 #datatable（thead 表头）与 Grid 表格（表头在 tbody 第一行的 th）。
         const table = document.querySelector('table#datatable') || document.querySelector('table#GridSubmissions')
           || Array.from(document.querySelectorAll('table')).find((tb) => tb.querySelector('th'))
         if (!table) return null
@@ -592,13 +590,12 @@ async function parseTable(frame: any): Promise<{ headers: string[]; rows: string
  * 遍历表格的所有分页（EM datatable 常见分页），最多 maxPages 页，合并返回全部行。
  * 用于决策历史等可能跨页的分区；普通活跃分区（一般一页内）仍走 parseTable。
  * 分页控件是 <a href="javascript:document.resort.currentpage.value=N;document.resort.submit();">Next</a>，
- * 点击后 content iframe 整页导航（2-4s），故翻页后轮询等待第一行编号变化，避免导航中误判/断连。
- */
+ * 点击会让 content iframe 整页导航（2-4s），故翻页后轮询等待第一行编号变化，避免导航中误判断连。 */
 async function scrapeTableAllPages(frame: any, maxPages = 8): Promise<{ headers: string[]; rows: string[][] } | null> {
   let merged: { headers: string[]; rows: string[][] } | null = null
   let prevFirst = ''
   for (let p = 0; p < maxPages; p++) {
-    // 解析当前页（parseTable 内部已轮询等待表格；导航中 evaluate 抛错返回 null，这里短重试）
+    // 解析当前页（parseTable 内部已轮询等待表格；导航中 evaluate 抛错返回 null，这里短重试）。
     let parsed = await parseTable(frame)
     if (!parsed || parsed.rows.length === 0) {
       let ok = false
@@ -609,10 +606,11 @@ async function scrapeTableAllPages(frame: any, maxPages = 8): Promise<{ headers:
       }
       if (!ok) break
     }
+    if (!parsed) break
     if (!merged) merged = { headers: parsed.headers, rows: [] }
-    // 用第二列（Manuscript Number）做翻页判断：第一列是 Action 链接列，每页都相同
+    // 用第二列（Manuscript Number）做翻页判断：第一列是 Action 链接列，每页都相同。
+    // 翻页后第一行编号未变 → 页面没跳转（已是最后一页/点击未生效），停止，防死循环。
     const first = parsed.rows[0]?.[1] ?? parsed.rows[0]?.[0] ?? ''
-    // 翻页后第一行编号未变 → 页面没跳转（已是最后一页/点击未生效），停止，防死循环
     if (p > 0 && first === prevFirst) break
     merged.rows.push(...parsed.rows)
     prevFirst = first
@@ -628,7 +626,7 @@ async function scrapeTableAllPages(frame: any, maxPages = 8): Promise<{ headers:
       return true
     }).catch(() => false)
     if (!clicked) break
-    // 等待翻页生效：第二列编号变化（表单提交整页导航，最多 ~8s）
+    // 等待翻页生效：第二列编号变化（表单提交整页导航，最多等 ~8s）。
     let moved = false
     for (let w = 0; w < 16; w++) {
       await frame.waitForTimeout(500)
@@ -664,9 +662,56 @@ function normalizeRows(parsed: { headers: string[]; rows: string[][] } | null): 
   }).filter((s) => s.number || s.title)
 }
 
-/** 启动 Playwright Chromium；browserPath 非空时用其中的 headless shell（版本号取自 playwright 期望值） */
+// ===== 持久化浏览器会话（B 方案）=====
+// 目的：支持 ORCID / 学校 SSO / Taylor&Francis 等「没法用账号密码填表完成」的登录。
+// 做法：Chromium 用固定的 profile 目录启动（launchPersistentContext），人工在有头窗口里登录一次，
+// cookie 落到 profile 里；之后所有无头抓取都复用这份登录态，不再走 Editorial Manager 表单。
+const PC_LOGIN_TIMEOUT_MS = 10 * 60 * 1000
+
+/** 持久化 profile 目录（自动创建）。 */
+function pcProfileDir(): string {
+  const dir = join(homedir(), '.dsh', 'paper-checker', 'browser-profile')
+  try { mkdirSync(dir, { recursive: true }) } catch { /* 静默 */ }
+  return dir
+}
+
+// 同一个 profile 不能被两个 Chromium 实例同时打开（Chromium 的 ProcessSingleton 会让后启动的那个直接失败），
+// 所以浏览器会话串行化：定时检查 / 面板检查 / 登录一次排队执行，而不是互相把 profile 锁死。
+let __pcBrowserChain: Promise<void> = Promise.resolve()
+async function pcAcquireBrowser(): Promise<() => void> {
+  const prev = __pcBrowserChain
+  let releaseSlot: () => void = () => {}
+  __pcBrowserChain = new Promise<void>((r) => { releaseSlot = r })
+  await prev
+  let done = false
+  let guard: any = null
+  const release = () => {
+    if (done) return
+    done = true
+    if (guard) clearTimeout(guard)
+    try { releaseSlot() } catch { /* 静默 */ }
+  }
+  // 兜底：调用点若在异常路径漏关，20 分钟后自动放行，避免整条队列永久卡死。
+  guard = setTimeout(release, 20 * 60 * 1000)
+  try { (guard as any).unref?.() } catch { /* 静默 */ }
+  return release
+}
+
+/** 清掉 Chromium 的单例锁文件（上个进程被强杀时残留，会让新实例启动失败）。 */
+function pcClearSingleton(profileDir: string): void {
+  for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile']) {
+    try { const p = join(profileDir, f); if (existsSync(p)) rmSync(p, { force: true }) } catch { /* 静默 */ }
+  }
+}
+
+/** 启动 Playwright Chromium；browserPath 非空时用其中的 headless shell（版本号取自 playwright 期望值）。
+ *  B 方案：改为在持久化 profile 里启动，返回 BrowserContext（自带 newPage()/close()，调用点可直接用）。
+ *  启动失败（profile 被占 / 损坏）时清一次单例锁重试，再失败就退回临时 Browser ——
+ *  保证「现有 EM 期刊照旧能抓」这条底线不被 profile 问题拖垮。 */
 async function launchChromium(browserPath?: string): Promise<any> {
   const { chromium } = pwRequire('playwright-core')
+  const release = await pcAcquireBrowser()
+  const opts: any = { headless: true, viewport: { width: 1440, height: 900 }, locale: 'en-US' }
   if (browserPath) {
     const expected = chromium.executablePath()
     const rev = expected.match(/chromium[_-]?(\d+)/)?.[1]
@@ -674,11 +719,700 @@ async function launchChromium(browserPath?: string): Promise<any> {
       const exe = join(browserPath, `chromium_headless_shell-${rev}`, 'chrome-win', 'headless_shell.exe')
       if (existsSync(exe)) {
         process.env.PLAYWRIGHT_BROWSERS_PATH = browserPath
-        return chromium.launch({ headless: true, executablePath: exe })
+        opts.executablePath = exe
       }
     }
   }
-  return chromium.launch({ headless: true })
+  const dir = pcProfileDir()
+  let ctx: any = null
+  try {
+    ctx = await chromium.launchPersistentContext(dir, opts)
+  } catch (e1) {
+    log(defaultReportDir(), '持久化 profile 启动失败: ' + String(e1).split('\n')[0].slice(0, 300))
+    if (/singleton|in use|already (running|open)|lock|EBUSY|EPERM/i.test(String(e1))) {
+      pcClearSingleton(dir)
+      await new Promise((r) => setTimeout(r, 1200))
+      try { ctx = await chromium.launchPersistentContext(dir, opts) } catch (e2) {
+        log(defaultReportDir(), '清锁后仍失败: ' + String(e2).split('\n')[0].slice(0, 300))
+      }
+    }
+  }
+  if (ctx) {
+    try { ctx.on('close', release) } catch { release() }
+    return ctx
+  }
+  // 回退：临时 Browser（不持久化，用不上登录态，但抓取不整体失败）。
+  try {
+    const b = await chromium.launch({ headless: true })
+    try { b.on('disconnected', release) } catch { release() }
+    return b
+  } catch (e3) {
+    release()
+    throw e3
+  }
+}
+
+/** 统一取页面：持久化 context 启动时自带一个 about:blank 页，复用它；
+ *  回退的 Browser 没有 newPage()，走 newContext()+newPage()。 */
+async function openBrowserPage(browser: any): Promise<any> {
+  if (browser && typeof browser.newPage === 'function') {
+    const pages = browser.pages?.() ?? []
+    const blank = pages.find((p: any) => { try { return p.url() === 'about:blank' } catch { return false } })
+    return blank || browser.newPage()
+  }
+  const c = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'en-US' })
+  return c.newPage()
+}
+
+/** 登录页特征：URL 里出现这些，就当「还在登录流程里」。 */
+const PC_LOGIN_URL_RE = /(\/|\?)login|login\.aspx?|accounts\.|identity|\/signin|sign-in|\/auth|oauth|openid|sso|shibboleth/i
+
+/** 页面上（含各 iframe）是否还有登录表单：EM 的 username/authorLogin，或任意密码框。
+ *  表单还在就一定没登录 —— 这条比 URL 可靠（EM 登录页把密码框藏在 hideElement 里，
+ *  所以只按 DOM 里存在，不看可见性）。 */
+async function pcHasLoginForm(page: any): Promise<boolean> {
+  const sel = "input[name='username'], input[name='authorLogin'], input[type='password']"
+  const countIn = async (t: any) => { try { return (await t.locator(sel).count()) > 0 } catch { return false } }
+  if (await countIn(page)) return true
+  for (const f of (page.frames?.() ?? [])) { if (await countIn(f)) return true }
+  return false
+}
+
+/** 取业务正文（优先 content iframe：EM 的主体内容在 iframe 里）。 */
+async function pcBodyText(page: any): Promise<string> {
+  const cf = page.frame?.({ name: 'content' })
+  const t1 = cf ? await cf.evaluate(() => (document.body ? document.body.innerText : '')).catch(() => '') : ''
+  if (t1 && String(t1).trim()) return String(t1)
+  return String(await page.evaluate(() => (document.body ? document.body.innerText : '')).catch(() => '') || '')
+}
+
+/** 判断某一页是否已经登录成功（「登录一次」轮询用）：没登录表单 + URL 不像登录页 + 正文有业务字样。 */
+async function pcLoggedInSignal(page: any, startHost: string): Promise<{ ok: boolean; url: string; why: string }> {
+  const url = String(page.url?.() ?? '')
+  if (!url || url === 'about:blank' || !/^https?:/i.test(url)) return { ok: false, url, why: 'blank' }
+  let host = ''
+  try { host = new URL(url).hostname.toLowerCase() } catch { host = '' }
+  if (await pcHasLoginForm(page)) return { ok: false, url, why: 'login-form' }
+  const leftHost = !!startHost && !!host && host !== startHost
+  if (!leftHost && PC_LOGIN_URL_RE.test(url)) return { ok: false, url, why: 'login-url' }
+  const txt = await pcBodyText(page)
+  if (String(txt).trim().length < 40) return { ok: false, url, why: 'thin-page' }
+  if (!/(submission|manuscript|author|dashboard|profile|account|welcome|orcid|home|my )/i.test(txt)) return { ok: false, url, why: 'no-biz-text' }
+  return { ok: true, url, why: 'ok' }
+}
+
+/** 有头浏览器可执行文件候选：先试配置里的浏览器目录（chromium-<rev> 完整包，不是 headless shell），
+ *  再试 Playwright 默认安装，最后交给 playwright 自己解析。 */
+function pcHeadedExeCandidates(browserPath?: string): (string | undefined)[] {
+  const { chromium } = pwRequire('playwright-core')
+  const out: (string | undefined)[] = []
+  const push = (p?: string) => { if (p && existsSync(p) && !out.includes(p)) out.push(p) }
+  try {
+    const expected = chromium.executablePath()
+    const rev = expected?.match(/chromium[_-]?(\d+)/)?.[1]
+    if (browserPath && rev) {
+      push(join(browserPath, `chromium-${rev}`, 'chrome-win', 'chrome.exe'))
+      push(join(browserPath, `chromium-${rev}`, 'chrome-win64', 'chrome.exe'))
+      process.env.PLAYWRIGHT_BROWSERS_PATH = browserPath
+    }
+    push(expected)
+  } catch { /* 静默 */ }
+  out.push(undefined)
+  return out
+}
+
+let __pcLoginOnceBusy = false
+/** 人工登录一次：有头窗口打开期刊入口，等用户自己完成 ORCID / SSO / 表单登录。
+ *  登录态（cookie）随 profile 落盘，之后的无头抓取直接复用。 */
+async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ctxAny: any, finalUrl: string) => Promise<any>): Promise<{
+  ok: boolean; finalUrl?: string; waitedMs?: number; error?: string; profileDir?: string; structure?: any
+}> {
+  const { chromium } = pwRequire('playwright-core')
+  const startedAt = Date.now()
+  const release = await pcAcquireBrowser()
+  let ctx: any = null
+  const launchErr: string[] = []
+  try {
+    const dir = pcProfileDir()
+    for (const exe of pcHeadedExeCandidates(browserPath)) {
+      const opts: any = { headless: false, viewport: { width: 1280, height: 860 }, locale: 'en-US' }
+      if (exe) opts.executablePath = exe
+      try {
+        ctx = await chromium.launchPersistentContext(dir, opts)
+        break
+      } catch (e) {
+        launchErr.push((exe ? 'exe=' + exe + ' ' : 'default ') + String(e).split('\n')[0].slice(0, 200))
+        if (/singleton|in use|already (running|open)|lock|EBUSY|EPERM/i.test(String(e))) {
+          pcClearSingleton(dir)
+          await new Promise((r) => setTimeout(r, 1200))
+        }
+      }
+    }
+    if (!ctx) {
+      return { ok: false, waitedMs: Date.now() - startedAt, error: '有头浏览器启动失败（没有可用的完整 Chromium）： ' + launchErr.join(' | ').slice(0, 500) }
+    }
+    const page = (ctx.pages?.() ?? [])[0] ?? (await ctx.newPage())
+    let startHost = ''
+    try { startHost = new URL(baseUrl).hostname.toLowerCase() } catch { /* 静默 */ }
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => { /* 静默 */ })
+    // 每 1s 轮询 context 内所有 page（ORCID 登录常在新标签页里完成）
+    let okUrl = ''
+    let stable = 0
+    let lastUrl = String(page.url?.() ?? '')
+    while (Date.now() - startedAt < PC_LOGIN_TIMEOUT_MS) {
+      await new Promise((r) => setTimeout(r, 1000))
+      let hit = ''
+      for (const pg of (ctx.pages?.() ?? [])) {
+        const u = String(pg.url?.() ?? '')
+        if (u) lastUrl = u
+        const sig = await pcLoggedInSignal(pg, startHost)
+        if (sig.ok) { hit = sig.url; break }
+      }
+      if (!hit) { okUrl = ''; stable = 0; continue }
+      if (hit === okUrl) stable += 1
+      else { okUrl = hit; stable = 1 }
+      if (stable >= 2) break // 连续 2 次（间隔 ~2s）停在同一个业务页 = 认为登录稳定
+    }
+    if (okUrl) {
+      // 第二步：登录成功后、关窗口之前先做结构识别（复用刚拿到的登录态，不用二次登录）。
+      let structure: any
+      if (onLoggedIn) {
+        try { structure = await onLoggedIn(ctx, okUrl) } catch (e) { structure = { error: String(e) } }
+      }
+      return { ok: true, finalUrl: okUrl, waitedMs: Date.now() - startedAt, profileDir: dir, structure }
+    }
+    return {
+      ok: false,
+      finalUrl: lastUrl,
+      waitedMs: Date.now() - startedAt,
+      error: '等了 ' + Math.round(PC_LOGIN_TIMEOUT_MS / 60000) + ' 分钟仍未检测到登录成功（登录态可能已存进 profile，可再点一次试试）',
+      profileDir: dir,
+    }
+  } catch (e) {
+    return { ok: false, waitedMs: Date.now() - startedAt, error: String(e) }
+  } finally {
+    try { await ctx?.close?.() } catch { /* 静默 */ }
+    release()
+  }
+}
+
+// ============ 第二步：登录后结构识别 + 通用抓取器 ============
+// 思路：人工登录一次拿到持久化登录态后，立刻把「登录态可见」的页面结构摘要交给 LLM 判型，
+// 记住投稿列表页与字段选择器，写到 ~/.dsh/paper-checker/structures/<site>.json（独立文件，不动期刊 schema）。
+// 抓取时先看这份 plan：EM 或没有 plan → 走 EM 逻辑（行为不变）；其他系统 → 通用抓取器（DOM 优先，0 条回退 LLM）。
+/** 通用抓取器需要的运行时依赖（LLM 通道 + 可选覆盖模型）。 */
+type ScrapeEnv = { llmService?: any; settingsService?: any; providerOverride?: string; modelOverride?: string }
+
+interface StructurePlan {
+  system: string
+  listUrl: string
+  rowSelector: string
+  fields: Record<string, string>
+  menuSections: string[]
+  confidence: number
+  notes: string
+}
+
+const PC_SYSTEMS = ['editorial-manager', 'scholarone', 'taylorfrancis', 'sNAPP', 'other']
+const PC_SYSTEM_LABEL: Record<string, string> = {
+  'editorial-manager': 'Editorial Manager',
+  scholarone: 'ScholarOne',
+  taylorfrancis: 'Taylor & Francis',
+  sNAPP: 'sNAPP',
+  other: '未知投稿系统',
+}
+function pcSystemLabel(s: string): string { return PC_SYSTEM_LABEL[String(s ?? '')] || String(s ?? '') }
+/** 疑似投稿列表页的链接特征（主动打开 1-3 个候选页用）。 */
+const PC_LIST_HINT_RE = /submissions?|manuscripts?|my submissions|author dashboard|dashboard|submission status/i
+
+function pcStructuresDir(): string {
+  const dir = join(homedir(), '.dsh', 'paper-checker', 'structures')
+  try { mkdirSync(dir, { recursive: true }) } catch { /* 静默 */ }
+  return dir
+}
+/** baseUrl → 稳定文件名（主机名 + 路径；非 [a-z0-9._-] 归一为 '_'）。 */
+function pcStructureKey(baseUrl: string): string {
+  let raw = String(baseUrl ?? '')
+  try {
+    const u = new URL(raw)
+    raw = u.hostname + (u.pathname && u.pathname !== '/' ? u.pathname : '')
+  } catch { /* 不是 URL 就按原串处理 */ }
+  const key = raw.toLowerCase().replace(/^https?:\/\//, '').replace(/[^a-z0-9._-]+/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '')
+  return (key || 'site').slice(0, 120)
+}
+function pcStructurePath(baseUrl: string): string { return join(pcStructuresDir(), pcStructureKey(baseUrl) + '.json') }
+
+/** 读结构 plan；没有文件返回 {path}（表示没有 plan），文件坏掉返回 {path,error}。 */
+function pcReadStructure(baseUrl: string): { plan?: StructurePlan; path: string; error?: string } {
+  const p = pcStructurePath(baseUrl)
+  if (!existsSync(p)) return { path: p }
+  try {
+    const obj: any = JSON.parse(readFileSync(p, 'utf8'))
+    if (!obj?.plan || typeof obj.plan !== 'object') return { path: p, error: '结构文件里没有 plan' }
+    return { path: p, plan: obj.plan as StructurePlan }
+  } catch (e) {
+    return { path: p, error: '结构文件解析失败: ' + String(e) }
+  }
+}
+
+function pcStr(v: any, max = 300): string {
+  return typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, max) : ''
+}
+
+/** 清洗 LLM 返回的 plan：system 白名单、listUrl 必须是 http(s)、confidence 夹到 0..1。 */
+function pcSanitizePlan(raw: any, _fallbackUrl: string): StructurePlan {
+  const sysRaw = pcStr(raw?.system, 40).toLowerCase()
+  const system = PC_SYSTEMS.find((s) => s.toLowerCase() === sysRaw) || 'other'
+  let listUrl = pcStr(raw?.listUrl, 1000)
+  if (!/^https?:\/\//i.test(listUrl)) listUrl = ''
+  const fields: Record<string, string> = {}
+  for (const k of ['number', 'title', 'status', 'submitted', 'updated']) {
+    const v = pcStr(raw?.fields?.[k], 200)
+    if (v) fields[k] = v
+  }
+  const menuSections = Array.isArray(raw?.menuSections)
+    ? raw.menuSections.map((x: any) => pcStr(x, 80)).filter(Boolean).slice(0, 30)
+    : []
+  let confidence = Number(raw?.confidence)
+  if (!Number.isFinite(confidence)) confidence = 0
+  confidence = Math.max(0, Math.min(1, confidence))
+  return {
+    system,
+    listUrl,
+    rowSelector: pcStr(raw?.rowSelector, 300),
+    fields,
+    menuSections,
+    confidence,
+    notes: pcStr(raw?.notes, 800),
+  }
+}
+
+/** 结构识别用的 LLM 提示词：只准输出 JSON，判据写死，避免模型自由发挥。 */
+function pcStructurePrompt(baseUrl: string, journalName: string, digest: string, emHint: boolean): string {
+  return [
+    '你是网页结构分析器。下面是用户**已经登录**的期刊投稿系统若干页面的结构摘要',
+    '（每个页面的 URL + title + h1-h3 + 每张表的表头与前几行 + 按钮/链接文本 + 表单字段名）。',
+    '请判断这是哪个投稿系统，并给出「投稿列表页」与抓取选择器建议。只输出 JSON，不要解释、不要 Markdown 代码块。',
+    '',
+    'system 取值与判据：',
+    '- editorial-manager：URL 含 editorialmanager.com，页面有 Author Main Menu / Submissions Being Processed，',
+    '  表格列为 Manuscript Number / Article Title / Initial Date Submitted / Status Date / Current Status。',
+    '- scholarone：URL 含 mc.manuscriptcentral.com 或 scholarone，页面有 Author Dashboard / Submitted Manuscripts。',
+    '- taylorfrancis：URL 含 tandfonline.com，或页面有 Author Services / Track my article。',
+    '- sNAPP：URL 含 snapp，或页面有 sNAPP / Springer Nature 投稿界面。',
+    '- other：以上都不像。',
+    '',
+    '输出格式（严格 JSON，不要多余字段）：',
+    '{"system":"editorial-manager|scholarone|taylorfrancis|sNAPP|other",',
+    ' "listUrl":"列表页完整 URL（必须来自摘要里出现过的 URL；没有就给空串）",',
+    ' "rowSelector":"一行稿件对应的 CSS 选择器（不确定就给空串）",',
+    ' "fields":{"number":"稿号选择器或列名","title":"标题","status":"状态","submitted":"初始投稿日期","updated":"状态更新日期"},',
+    ' "menuSections":["页面上出现的分区名称"],',
+    ' "confidence":0 到 1 之间的小数,',
+    ' "notes":"一句话说明依据"}',
+    '',
+    'baseUrl: ' + baseUrl,
+    'journalName: ' + (journalName || '(未提供)'),
+    '页面特征提示: ' + (emHint
+      ? '已检测到 Editorial Manager 特征（Author Main Menu / Submissions Being Processed）'
+      : '未检测到 Editorial Manager 特征'),
+    '',
+    '=== 页面结构摘要开始 ===',
+    digest,
+    '=== 页面结构摘要结束 ===',
+  ].join('\n')
+}
+
+/** 单页（含所有 iframe）摘要：title、h1/h2/h3、表格 + 前 3 行、按钮/链接文本（去重后最多 120 条）、表单字段名。 */
+async function pcPageDigest(pg: any): Promise<{ text: string; lists: string[] }> {
+  const out: string[] = []
+  const lists: string[] = []
+  let frames: any[] = []
+  try { frames = pg.frames?.() ?? [] } catch { /* 静默 */ }
+  if (!frames.length) frames = [pg]
+  for (const fr of frames) {
+    let d: any = null
+    try {
+      d = await fr.evaluate(() => {
+        const txt = (el: any) => ((el && (el.innerText || el.textContent)) || '').replace(/\s+/g, ' ').trim()
+        const q = (sel: string) => Array.from(document.querySelectorAll(sel))
+        const tables = q('table').slice(0, 6).map((tb: any) => {
+          const rows = Array.from(tb.querySelectorAll('tr')).slice(0, 4)
+          return rows
+            .map((r: any) => Array.from(r.querySelectorAll('th,td')).map(txt).filter(Boolean).slice(0, 12).join(' | '))
+            .filter(Boolean)
+        }).filter((t: string[]) => t.length > 0)
+        const ctrls = Array.from(new Set(
+          q('a,button,input[type=button],input[type=submit]')
+            .map((e: any) => (txt(e) || e.value || '').trim())
+            .filter((t: string) => t && t.length <= 80),
+        )).slice(0, 120)
+        const fields = q('input,select,textarea').map((e: any) => e.getAttribute('name') || e.id || '').filter(Boolean).slice(0, 60)
+        const lists = Array.from(new Set(
+          q('a[href]').map((a: any) => String(a.href || ''))
+            .filter((h: string) => /submissions?|manuscripts?|my submissions|author dashboard|dashboard|submission status/i.test(h)),
+        )).slice(0, 30)
+        return { title: document.title || '', heads: q('h1,h2,h3').map(txt).filter(Boolean).slice(0, 12), tables, ctrls, fields, lists }
+      })
+    } catch { continue }
+    if (!d) continue
+    const chunk: string[] = []
+    if (d.title) chunk.push('title: ' + d.title)
+    if (d.heads?.length) chunk.push('heads: ' + d.heads.join(' / '))
+    if (d.tables?.length) d.tables.forEach((t: string[], i: number) => chunk.push('table' + (i + 1) + ': ' + t.join(' ;; ')))
+    if (d.ctrls?.length) chunk.push('controls: ' + d.ctrls.join(' | '))
+    if (d.fields?.length) chunk.push('formFields: ' + d.fields.join(','))
+    if (chunk.length) out.push(chunk.join('\n'))
+    for (const u of (d.lists ?? [])) if (!lists.includes(u)) lists.push(u)
+  }
+  return { text: out.join('\n\n'), lists }
+}
+
+/** 收集 context 内所有页面的摘要，再主动打开 1-3 个疑似投稿列表页补采（登录态下才有内容）。 */
+async function pcCollectStructureDigest(baseUrl: string, ctxAny: any): Promise<{ text: string; pages: string[] }> {
+  const chunks: string[] = []
+  const seen: string[] = []
+  const cands: string[] = []
+  const pages: any[] = (() => { try { return ctxAny?.pages?.() ?? [] } catch { return [] } })()
+  for (const pg of pages) {
+    let u = ''
+    try { u = String(pg.url?.() ?? '') } catch { /* 静默 */ }
+    if (!u || u === 'about:blank' || seen.includes(u)) continue
+    seen.push(u)
+    const d = await pcPageDigest(pg)
+    chunks.push('### page: ' + u + '\n' + d.text)
+    for (const l of d.lists) if (!cands.includes(l)) cands.push(l)
+  }
+  const picked = cands.filter((u) => !seen.includes(u) && PC_LIST_HINT_RE.test(u)).slice(0, 3)
+  for (const u of picked) {
+    let pg: any = null
+    try { pg = await ctxAny.newPage() } catch { break }
+    try {
+      await pg.goto(u, { waitUntil: 'domcontentloaded', timeout: 45000 })
+      await new Promise((r) => setTimeout(r, 1500)) // SPA 落地后再取 DOM
+      const d = await pcPageDigest(pg)
+      chunks.push('### page: ' + u + '  (list candidate)\n' + d.text)
+    } catch {
+      chunks.push('### page: ' + u + '  (list candidate, 打开失败)')
+    } finally {
+      try { await pg.close?.() } catch { /* 静默 */ }
+    }
+  }
+  return { text: chunks.join('\n\n'), pages: [...seen, ...picked] }
+}
+
+/** EM 的硬特征（主菜单 frame / 表格文案）：LLM 挂了也能保证 EM 期刊不被误判成 other。 */
+async function pcEmHint(ctxAny: any): Promise<boolean> {
+  const pages: any[] = (() => { try { return ctxAny?.pages?.() ?? [] } catch { return [] } })()
+  // 域名硬特征：editorialmanager.com 只服务 Editorial Manager（比页面文案更可靠，且不受 iframe 时序影响）。
+  try {
+    const urls = pages.map((pg: any) => String(pg?.url?.() ?? '')).join(' ')
+    if (/editorialmanager\.com/i.test(urls)) return true
+  } catch { /* 静默 */ }
+  for (const pg of pages) {
+    let frames: any[] = []
+    try { frames = pg.frames?.() ?? [] } catch { /* 静默 */ }
+    for (const fr of frames) {
+      const u = String(fr.url?.() ?? '')
+      if (/AuthorMainMenu|MainMenu/i.test(u)) return true
+      try {
+        const head = await fr.evaluate(() => String((document.body && (document.body as any).innerText) || '').slice(0, 1200))
+        if (/submissions being processed|submit new manuscript/i.test(String(head))) return true
+      } catch { /* 静默 */ }
+    }
+  }
+  return false
+}
+
+/** 识别 + 落盘。返回 {plan, planPath} 或 {error}（失败时绝不写假 plan）。 */
+async function pcRecognizeStructure(opts: {
+  baseUrl: string
+  journalName?: string
+  ctxAny: any
+  llmService: any
+  settingsService: any
+  providerOverride?: string
+  modelOverride?: string
+}): Promise<{ plan?: StructurePlan; planPath?: string; error?: string }> {
+  const baseUrl = String(opts.baseUrl)
+  try {
+    const emHint = await pcEmHint(opts.ctxAny)
+    const dig = await pcCollectStructureDigest(baseUrl, opts.ctxAny)
+    if (!dig.text.trim()) return { error: '登录成功，但页面上没取到可识别的结构（可能是纯前端空壳或整页 iframe 受限）。' }
+    const digest = dig.text.length > 60000 ? dig.text.slice(0, 60000) + '\n…（摘要已截断）' : dig.text
+    let plan: StructurePlan | undefined
+    let llmErr = ''
+    const provider = opts.providerOverride || 'deepseek-official'
+    const model = opts.modelOverride || (opts.providerOverride ? '' : 'deepseek-v4-pro')
+    try {
+      const raw = await callLlmText(
+        opts.llmService, opts.settingsService,
+        pcStructurePrompt(baseUrl, opts.journalName ?? '', digest, emHint),
+        opts.providerOverride, opts.modelOverride,
+      )
+      const m = String(raw).match(/\{[\s\S]*\}/)
+      if (!m) throw new Error('模型没有返回 JSON: ' + String(raw).slice(0, 200))
+      plan = pcSanitizePlan(JSON.parse(m[0]), baseUrl)
+    } catch (e) {
+      llmErr = String(e).split('\n')[0]
+    }
+    // EM 特征很硬：即便 LLM 挂了/判错，也按 editorial-manager 记一条高置信 plan（单刊抓取不受影响）。
+    if (emHint) {
+      const wantUrl = /AuthorMainMenu|MainMenu/i.test(String(plan?.listUrl ?? ''))
+        ? plan!.listUrl
+        : baseUrl + '/Default.aspx?pg=authorMainMenu'
+      plan = pcSanitizePlan({
+        ...(plan ?? {}),
+        system: 'editorial-manager',
+        confidence: Math.max(plan?.confidence ?? 0, 0.95),
+        listUrl: wantUrl,
+        notes: ((plan?.notes ? plan.notes + '；' : '') + '检测到 EM 主菜单/域名特征，按 Editorial Manager 处理'),
+      }, baseUrl)
+    }
+    if (!plan) return { error: '结构识别失败: ' + (llmErr || '模型返回为空') }
+    const planPath = pcStructurePath(baseUrl)
+    writeFileSync(planPath, JSON.stringify({
+      baseUrl,
+      journalName: opts.journalName ?? '',
+      capturedAt: new Date().toISOString(),
+      model: provider + '/' + (model || '(默认)'),
+      pages: dig.pages,
+      plan,
+    }, null, 2), 'utf8')
+    return { plan, planPath }
+  } catch (e) {
+    return { error: '结构识别异常: ' + String(e) }
+  }
+}
+
+function pcNormDate(v: any): string {
+  const s = pcStr(v, 60)
+  return s
+}
+
+/** DOM 提取：按 plan 的 rowSelector / 字段选择器抓行；选择器为空或没命中返回 []（由调用方回退 LLM）。 */
+async function pcExtractByPlan(pg: any, plan: StructurePlan): Promise<Submission[]> {
+  const rowSel = String(plan.rowSelector || '').trim()
+  if (!rowSel) return []
+  let rows: any[] = []
+  try {
+    rows = await pg.evaluate((arg: any) => {
+      const txt = (el: any) => ((el && (el.innerText || el.textContent)) || '').replace(/\s+/g, ' ').trim()
+      const pick = (root: any, sel: string) => {
+        if (!sel) return ''
+        try { return txt(root.querySelector(sel)) } catch { return '' }
+      }
+      const out: any[] = []
+      for (const r of Array.from(document.querySelectorAll(arg.row)).slice(0, 200)) {
+        const one: any = {}
+        for (const k of Object.keys(arg.fields || {})) one[k] = pick(r, String((arg.fields as any)[k] || ''))
+        out.push(one)
+      }
+      return out
+    }, { row: rowSel, fields: plan.fields ?? {} })
+  } catch {
+    return []
+  }
+  const subs: Submission[] = []
+  for (const r of rows) {
+    const number = pcStr(r?.number, 120)
+    const title = pcStr(r?.title, 500)
+    if (!number && !title) continue
+    subs.push({
+      number: number || '(未识别稿号)',
+      title: title || '(未识别标题)',
+      submitted: pcNormDate(r?.submitted),
+      statusDate: pcNormDate(r?.updated),
+      status: pcStr(r?.status, 200) || '未知状态',
+    })
+  }
+  return subs
+}
+
+/** 回退：列表页可见文本（≤40KB）交给 LLM 抽 JSON 数组。 */
+async function pcExtractByLlm(pg: any, plan: StructurePlan, opts: {
+  journalName: string; llmService: any; settingsService: any; providerOverride?: string; modelOverride?: string
+}): Promise<Submission[]> {
+  let body = ''
+  try {
+    body = String(await pg.evaluate(() => String((document.body && (document.body as any).innerText) || '')))
+  } catch { /* 静默 */ }
+  body = body.trim()
+  if (!body) return []
+  if (body.length > 40000) body = body.slice(0, 40000) + '\n…（正文已截断）'
+  const prompt = [
+    '下面是一个学术期刊投稿系统的「投稿列表页」纯文本（用户已登录' + (opts.journalName || '') + '）：',
+    '请把页面上的每一篇稿件抽成 JSON 数组，只输出数组本身（不要解释、不要 Markdown 代码块）。',
+    '[{"number":"稿号","title":"标题","status":"当前状态","submitted":"初始投稿日期","updated":"状态更新日期"}]',
+    '要求：没有的字段给空串；不要编造页面上不存在的稿件；一篇文章一行；最多 200 条。',
+    '识别到的系统类型提示: ' + plan.system,
+    '',
+    '=== 页面文本开始 ===',
+    body,
+    '=== 页面文本结束 ===',
+  ].join('\n')
+  const raw = await callLlmText(opts.llmService, opts.settingsService, prompt, opts.providerOverride, opts.modelOverride)
+  const text = String(raw)
+  let arr: any[] | null = null
+  const mArr = text.match(/\[[\s\S]*\]/)
+  const mObj = text.match(/\{[\s\S]*\}/)
+  try {
+    if (mArr) arr = JSON.parse(mArr[0])
+    else if (mObj) {
+      const o: any = JSON.parse(mObj[0])
+      arr = Array.isArray(o?.items) ? o.items : Array.isArray(o?.submissions) ? o.submissions : null
+    }
+  } catch { arr = null }
+  if (!Array.isArray(arr)) return []
+  const subs: Submission[] = []
+  for (const r of arr.slice(0, 200)) {
+    const number = pcStr(r?.number, 120)
+    const title = pcStr(r?.title, 500)
+    if (!number && !title) continue
+    subs.push({
+      number: number || '(未识别稿号)',
+      title: title || '(未识别标题)',
+      submitted: pcNormDate(r?.submitted),
+      statusDate: pcNormDate(r?.updated),
+      status: pcStr(r?.status, 200) || '未知状态',
+    })
+  }
+  return subs
+}
+
+/** 通用抓取器：非 EM 系统走这里（DOM 优先，0 条回退 LLM），status 里带上识别到的系统名。 */
+async function scrapeGenericJournal(j: JournalConfig, plan: StructurePlan, opts: ScrapeEnv & {
+  browserPath?: string
+}): Promise<JournalResult> {
+  const baseUrl = String(j.baseUrl)
+  const system = String(plan?.system || 'other')
+  // system 落到 'other' 时用更中性的标签，避免报告里出现「（未知投稿系统）」
+  const sysLabel = system === 'other' ? '通用抓取' : pcSystemLabel(system)
+  const listUrl = String(plan?.listUrl || '').trim()
+  const planPath = pcStructurePath(baseUrl)
+  if (!/^https?:\/\//i.test(listUrl)) {
+    return {
+      journal: j.name, system,
+      error: sysLabel + '：结构识别结果里没有可用的投稿列表页（' + planPath + '），请重新点一次「登录一次」。',
+    }
+  }
+  let browser: any = null
+  try {
+    browser = await launchChromium(opts.browserPath)
+    const page = await openBrowserPage(browser)
+    try {
+      await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
+    } catch (e) {
+      return {
+        journal: j.name, system,
+        error: sysLabel + '：打开列表页失败（' + listUrl + '）：' + String(e).split('\n')[0].slice(0, 240) +
+          '；已复用登录态：' + pcProfileDir() + '（如过期请再点一次「登录一次」）',
+      }
+    }
+    await new Promise((r) => setTimeout(r, 1200))
+    let subs: Submission[] = []
+    let how = 'DOM 选择器'
+    try {
+      subs = await pcExtractByPlan(page, plan)
+    } catch { /* 静默 */ }
+    if (!subs.length) {
+      how = 'LLM 文本抽取'
+      try {
+        subs = await pcExtractByLlm(page, plan, {
+          journalName: j.name,
+          llmService: opts.llmService,
+          settingsService: opts.settingsService,
+          providerOverride: opts.providerOverride,
+          modelOverride: opts.modelOverride,
+        })
+      } catch (e) {
+        return {
+          journal: j.name, system,
+          error: sysLabel + '：DOM 和 LLM 都没抓到稿件（' + listUrl + '）：' + String(e).split('\n')[0].slice(0, 240) +
+            '；已复用登录态：' + pcProfileDir(),
+        }
+      }
+    }
+    if (!subs.length) {
+      return {
+        journal: j.name, system,
+        error: sysLabel + '：列表页 ' + listUrl + ' 上没有解析到稿件（可能确实 0 条，也可能页面结构与识别结果不符）；已复用登录态：' + pcProfileDir() +
+          '；可重新点「登录一次」刷新结构（' + planPath + '）。',
+      }
+    }
+    // status 末尾附系统名，报告里一眼看出这条来自哪个系统。
+    const tagged: Submission[] = subs.map((s) => ({
+      ...s,
+      status: [s.status, sysLabel ? '（' + sysLabel + '）' : ''].join(''),
+    }))
+    const sectionName = (plan.menuSections && plan.menuSections[0]) ? plan.menuSections[0] : sysLabel + ' 投稿列表'
+    return {
+      journal: j.name,
+      system,
+      sections: [{ name: sectionName, count: tagged.length, submissions: tagged }],
+    }
+  } catch (e) {
+    return {
+      journal: j.name, system,
+      error: sysLabel + '：通用抓取异常（' + listUrl + '）：' + String(e).split('\n')[0].slice(0, 240),
+    }
+  } finally {
+    try { await browser?.close?.() } catch { /* 静默 */ }
+  }
+}
+
+/** 抓取分流：有结构 plan 且不是 EM → 通用抓取器；EM / 没有 plan → 走 EM 逻辑（行为不变）。
+ *  system='other' 的期刊：以前一律回退信号，现在只要登录后识别出了非 EM 系统就真的去抓（没有 plan 时行为不变）。 */
+async function scrapeJournal(j: JournalConfig, browserPath?: string, env?: ScrapeEnv): Promise<JournalResult> {
+  const st = pcReadStructure(j.baseUrl)
+  const plan = st.plan
+  const e = env ?? {}
+  if (j.system === 'other') {
+    if (plan && plan.system !== 'editorial-manager') return scrapeGenericJournal(j, plan, { browserPath, ...e })
+    return { journal: j.name, system: 'other' }
+  }
+  if (!plan || plan.system === 'editorial-manager') return scrapeEmJournal(j, browserPath)
+  return scrapeGenericJournal(j, plan, { browserPath, ...e })
+}
+
+/** 抓取前先探一下持久化 profile 里有没有有效会话：有就直接进业务页，不走 EM 表单登录。
+ *  kind='em' 复用主菜单 frame；kind='authed-other' 说明登录态有了但站点不是 EM；kind='none' 走原流程。 */
+async function pcDetectSession(page: any, baseUrl: string, dbg: string[]): Promise<{
+  kind: 'em' | 'authed-other' | 'none'; frame?: any; url?: string
+}> {
+  try {
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
+  } catch (e) {
+    dbg.push('probeGoto=' + String(e).split('\n')[0])
+    return { kind: 'none' }
+  }
+  for (let i = 0; i < 14; i++) {
+    const f = page.frame({ name: 'content' })
+    const fu = f ? String(f.url?.() ?? '') : ''
+    const cfSettled = !!(f && fu && !fu.includes('about:blank'))
+    if (f && /AuthorMainMenu|MainMenu/i.test(fu)) {
+      const txt = await f.evaluate(() => (document.body ? document.body.innerText : '')).catch(() => '')
+      if (/submission/i.test(String(txt))) { dbg.push('probe=em-reuse'); return { kind: 'em', frame: f } }
+    }
+    // 页面上还挂着登录表单 → 肯定没登录，直接走原 EM 表单流程（不必再空等）。
+    if (await pcHasLoginForm(page)) { dbg.push('probe=login-form'); return { kind: 'none' } }
+    // 没有任何登录表单 + 正文有业务字样 → 已登录但不是 EM（例如 Taylor&Francis 作者中心）。
+    // 注意：EM 新版外壳页（frameset）主文档自带「Main Menu / Submit a Manuscript」等文字，
+    // content iframe 还没提交时这一条会先命中，把「已登录的 EM」误判成 authed-other，
+    // 于是复用登录态的 EM 抓取直接放弃（报告里那句「不是 Editorial Manager 主菜单」）。
+    // 因此：content iframe 存在时（EM 的 frameset 外壳）一律继续等它落定/变成主菜单，
+    // 只有「根本没有 content iframe」（无 frameset 的其它系统）或等满轮数才判定 authed-other。
+    if (!cfSettled && (i >= 2 && !f || i >= 13)) {
+      const txt = String(await pcBodyText(page) || '')
+      if (txt.trim().length >= 80 && /(submission|manuscript|dashboard|author|profile|account|welcome)/i.test(txt)) {
+        dbg.push('probe=authed-other url=' + page.url())
+        return { kind: 'authed-other', url: String(page.url?.() ?? '') }
+      }
+    }
+    await page.waitForTimeout(700)
+  }
+  dbg.push('probe=none url=' + String(page.url?.() ?? ''))
+  return { kind: 'none' }
 }
 
 /** 登录 EM 期刊并返回作者主菜单信息（用于「新增期刊」自动识别 name/sections）。 */
@@ -688,33 +1422,42 @@ async function loginAndGetMenu(baseUrl: string, username: string, password: stri
   const dbg: string[] = []
   const browser = await launchChromium(browserPath)
   try {
-    const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'en-US' })
-    const page = await ctx.newPage()
-    await page.goto(`${baseUrl}/Default.aspx?pg=login.asp&username=`, { waitUntil: 'domcontentloaded', timeout: 60000 })
-    let frame = await waitForFrame(page)
-    if (!frame) return { title: '', bodyText: '', counts: {}, links: {}, error: '未找到登录 iframe' }
-    dbg.push('frameUrl=' + frame.url())
+    const page = await openBrowserPage(browser)
+    // 先看持久化 profile 里有没有有效会话（「登录一次」留下的 ORCID/SSO cookie）：有就直接进业务页。
+    const probe = await pcDetectSession(page, baseUrl, dbg)
+    let frame: any = null
+    if (probe.kind === 'em' && probe.frame) {
+      frame = probe.frame
+      dbg.push('login=reused-profile')
+    } else if (probe.kind === 'authed-other') {
+      return { title: '', bodyText: '', counts: {}, links: {}, error: '已复用登录态（' + String(probe.url ?? '') + '），但打开的页面不是 Editorial Manager 主菜单；自动识别只支持 EM，其他投稿系统需要单独的解析适配器' }
+    } else {
+      await page.goto(`${baseUrl}/Default.aspx?pg=login.asp&username=`, { waitUntil: 'domcontentloaded', timeout: 60000 })
+      frame = await waitForFrame(page)
+      if (!frame) return { title: '', bodyText: '', counts: {}, links: {}, error: '未找到登录 iframe' }
+      dbg.push('frameUrl=' + frame.url())
 
-    await frame.waitForSelector("input[name='username']", { state: 'attached', timeout: 20000 }).catch(() => {})
-    await frame.evaluate(() => {
-      const details = document.querySelector('#traditionalLoginCollapsible')
-      if (details) (details as any).open = true
-      const ud = document.querySelector('#userNamePasswordDiv')
-      if (ud) ud.classList.remove('hideElement')
-      const eb = document.querySelector('#emLoginButtonsDiv')
-      if (eb) eb.classList.remove('hideElement')
-    }).catch(() => {})
-    await frame.waitForSelector("input[name='username']", { state: 'visible', timeout: 10000 }).catch(() => {})
-    const uVisible = await frame.locator("input[name='username']").isVisible().catch(() => false)
-    dbg.push('usernameVisible=' + uVisible)
-    if (uVisible) {
-      await frame.fill("input[name='username']", username).catch((e) => dbg.push('fillU=' + String(e).split('\n')[0]))
-      await frame.fill("input[name='password']", password).catch((e) => dbg.push('fillP=' + String(e).split('\n')[0]))
-      const ab = frame.locator("input[name='authorLogin']")
-      await ab.click().catch((e) => dbg.push('clickA=' + String(e).split('\n')[0]))
+      await frame.waitForSelector("input[name='username']", { state: 'attached', timeout: 20000 }).catch(() => {})
+      await frame.evaluate(() => {
+        const details = document.querySelector('#traditionalLoginCollapsible')
+        if (details) (details as any).open = true
+        const ud = document.querySelector('#userNamePasswordDiv')
+        if (ud) ud.classList.remove('hideElement')
+        const eb = document.querySelector('#emLoginButtonsDiv')
+        if (eb) eb.classList.remove('hideElement')
+      }).catch(() => {})
+      await frame.waitForSelector("input[name='username']", { state: 'visible', timeout: 10000 }).catch(() => {})
+      const uVisible = await frame.locator("input[name='username']").isVisible().catch(() => false)
+      dbg.push('usernameVisible=' + uVisible)
+      if (uVisible) {
+        await frame.fill("input[name='username']", username).catch((e: any) => dbg.push('fillU=' + String(e).split('\n')[0]))
+        await frame.fill("input[name='password']", password).catch((e: any) => dbg.push('fillP=' + String(e).split('\n')[0]))
+        const ab = frame.locator("input[name='authorLogin']")
+        await ab.click().catch((e: any) => dbg.push('clickA=' + String(e).split('\n')[0]))
+      }
     }
     frame = await waitForMainMenu(page)
-    if (!frame) return { title: '', bodyText: '', counts: {}, links: {}, error: '登录失败或未等到主菜单 [' + dbg.join(' | ') + ']' }
+    if (!frame) return { title: '', bodyText: '', counts: {}, links: {}, error: '登录失败或未等到主菜单[' + dbg.join(' | ') + ']' }
 
     const title = await frame.evaluate(() => {
       const t = document.querySelector('h1, h2, .pageTitle, #pageTitle')
@@ -734,42 +1477,56 @@ async function scrapeEmJournal(j: JournalConfig, browserPath?: string): Promise<
   const dbg: string[] = []
   const browser = await launchChromium(browserPath)
   try {
-    const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'en-US' })
-    const page = await ctx.newPage()
-    await page.goto(`${j.baseUrl}/Default.aspx?pg=login.asp&username=`, { waitUntil: 'domcontentloaded', timeout: 60000 })
-    let frame = await waitForFrame(page)
-    if (!frame) return { journal: j.name, system: 'editorial-manager', error: '未找到登录 iframe' }
-    dbg.push('frameUrl=' + frame.url())
+    const page = await openBrowserPage(browser)
+    // 先看持久化 profile 里有没有有效会话（「登录一次」留下的 ORCID/SSO cookie）：有就直接用，不走 EM 表单。
+    const probe = await pcDetectSession(page, j.baseUrl, dbg)
+    let frame: any = null
+    if (probe.kind === 'em' && probe.frame) {
+      frame = probe.frame
+      dbg.push('login=reused-profile')
+    } else if (probe.kind === 'authed-other') {
+      // 登录态有了，但站点不是 Editorial Manager：表格/主菜单解析器抓不到，属于「解析适配器」的问题。
+      return {
+        journal: j.name,
+        system: 'editorial-manager',
+        error: '已复用登录态（' + String(probe.url ?? '') + '），但该站点不是 Editorial Manager 主菜单，当前解析适配器抓不到数据；可把该期刊 system 设为 other，或等解析适配器支持该投稿系统',
+      }
+    } else {
+      await page.goto(`${j.baseUrl}/Default.aspx?pg=login.asp&username=`, { waitUntil: 'domcontentloaded', timeout: 60000 })
+      frame = await waitForFrame(page)
+      if (!frame) return { journal: j.name, system: 'editorial-manager', error: '未找到登录 iframe' }
+      dbg.push('frameUrl=' + frame.url())
 
-    // 等 username 元素出现在 DOM（login.asp 异步渲染，先等 attached 不要求可见）
-    await frame.waitForSelector("input[name='username']", { state: 'attached', timeout: 20000 }).catch(() => {})
-    // 主动展开传统登录折叠面板 + 移除 hideElement（CBM 的折叠/显示由 JS 动态控制）
-    await frame.evaluate(() => {
-      const details = document.querySelector('#traditionalLoginCollapsible')
-      if (details) (details as any).open = true
-      const ud = document.querySelector('#userNamePasswordDiv')
-      if (ud) ud.classList.remove('hideElement')
-      const eb = document.querySelector('#emLoginButtonsDiv')
-      if (eb) eb.classList.remove('hideElement')
-    }).catch(() => {})
-    await frame.waitForSelector("input[name='username']", { state: 'visible', timeout: 10000 }).catch(() => {})
-    const uVisible = await frame.locator("input[name='username']").isVisible().catch(() => false)
-    dbg.push('usernameVisible=' + uVisible)
-    if (uVisible) {
-      await frame.fill("input[name='username']", j.username).catch((e) => dbg.push('fillU=' + String(e).split('\n')[0]))
-      await frame.fill("input[name='password']", j.password).catch((e) => dbg.push('fillP=' + String(e).split('\n')[0]))
-      const ab = frame.locator("input[name='authorLogin']")
-      const abVisible = await ab.isVisible().catch(() => false)
-      dbg.push('authorVisible=' + abVisible)
-      await ab.click().catch((e) => dbg.push('clickA=' + String(e).split('\n')[0]))
+      // 等 username 元素出现在 DOM（login.asp 异步渲染，先等 attached 不要求可见）。
+      await frame.waitForSelector("input[name='username']", { state: 'attached', timeout: 20000 }).catch(() => {})
+      // 主动展开传统登录折叠面板 + 移除 hideElement（CBM 的折叠显示由 JS 动态控制）。
+      await frame.evaluate(() => {
+        const details = document.querySelector('#traditionalLoginCollapsible')
+        if (details) (details as any).open = true
+        const ud = document.querySelector('#userNamePasswordDiv')
+        if (ud) ud.classList.remove('hideElement')
+        const eb = document.querySelector('#emLoginButtonsDiv')
+        if (eb) eb.classList.remove('hideElement')
+      }).catch(() => {})
+      await frame.waitForSelector("input[name='username']", { state: 'visible', timeout: 10000 }).catch(() => {})
+      const uVisible = await frame.locator("input[name='username']").isVisible().catch(() => false)
+      dbg.push('usernameVisible=' + uVisible)
+      if (uVisible) {
+        await frame.fill("input[name='username']", j.username).catch((e: any) => dbg.push('fillU=' + String(e).split('\n')[0]))
+        await frame.fill("input[name='password']", j.password).catch((e: any) => dbg.push('fillP=' + String(e).split('\n')[0]))
+        const ab = frame.locator("input[name='authorLogin']")
+        const abVisible = await ab.isVisible().catch(() => false)
+        dbg.push('authorVisible=' + abVisible)
+        await ab.click().catch((e: any) => dbg.push('clickA=' + String(e).split('\n')[0]))
+      }
     }
     frame = await waitForMainMenu(page)
-    if (!frame) return { journal: j.name, system: 'editorial-manager', error: '登录失败或未等到主菜单 [' + dbg.join(' | ') + ']' }
+    if (!frame) return { journal: j.name, system: 'editorial-manager', error: '登录失败或未等到主菜单[' + dbg.join(' | ') + ']' }
 
     const { counts, links } = await scrapeMenu(frame)
     // 分区清单优先采用「自动识别」时 LLM 给出的组织结构：顺序、是否抓取、kind 都由它定
-    // （决策历史分区 kind=decision，报告里只列最近 7 天决策的稿件）。
-    // structure 缺失（模型当年失败或旧配置）时回落到原来的确定性逻辑：
+    // （决策历史分区 kind=decision，报告里只列最近 7 天决策的稿件）
+    // structure 缺失（模型当年失败或旧配置）时回落到原来的确定性逻辑。
     // 配置里的 sections 保序优先，再按正则自动补充主菜单上的投稿分区。
     const st: any = (j as any).structure
     const stSections: { name: string; kind?: string; check?: boolean }[] = Array.isArray(st?.sections) ? st.sections : []
@@ -788,7 +1545,7 @@ async function scrapeEmJournal(j: JournalConfig, browserPath?: string): Promise<
       }
     }
     if (stSections.length) {
-      // LLM 顺序；check=false 的不抓；主菜单上找不到的跳过（不猜 href）
+      // LLM 顺序；check=false 的不抓；主菜单上找不到的跳过（不报 href 错）。
       for (const s of stSections) {
         const nm = typeof s?.name === 'string' ? s.name : ''
         if (!nm || s.check === false || !links[nm] || secNames.includes(nm)) continue
@@ -808,10 +1565,10 @@ async function scrapeEmJournal(j: JournalConfig, browserPath?: string): Promise<
       const kind: 'decision' | undefined = kindOf[secName] ?? (/with a decision/i.test(secName) ? 'decision' : undefined)
       if (count > 0 && href) {
         await frame.goto(href, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {})
-        // 决策历史可能跨页，遍历全部分页；普通活跃分区一页即可
+        // 决策历史可能跨页，遍历全部分页；普通活跃分区一页即够。
         const parsed = kind === 'decision' ? await scrapeTableAllPages(frame) : await parseTable(frame)
         const rows = normalizeRows(parsed)
-        // 转投/等待批准分区的 Current Status 列显示的是操作词（Reject/Decline），修正为「等待作者批准」
+        // 转投/等待批准分区的 Current Status 列显示的是操作词（Reject/Decline），修正为「等待作者批准」。
         if (/waiting for author|transfer/i.test(secName)) {
           for (const s of rows) if (/^reject|^decline/i.test(s.status)) s.status = 'Awaiting Author Approval'
         }
@@ -845,7 +1602,7 @@ const MONTHS: Record<string, number> = {
   jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
 }
 /** 解析 EM 常见日期格式（YYYY-MM-DD / MM/DD/YYYY / Mon DD YYYY / DD Mon YYYY / 带时间后缀），失败返回 null。 */
-function parseEmDate(s: string): Date | null {
+function parseEmDate(s: string | undefined): Date | null {
   const t = (s || '').trim()
   if (!t) return null
   let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/)
@@ -888,7 +1645,8 @@ function formatReport(results: JournalResult[], dateStr: string): string {
       lines.push(`- ⚠️ ${r.error}`)
       continue
     }
-    if (r.system === 'other') {
+    // 通用抓取器成功时 system 可能是 'other'/sNAPP 等；只有「没有抓取结果」才走人工兜底提示
+    if (r.system === 'other' && !(r.sections ?? []).length) {
       lines.push('- 需 AI 手动检查（非 Editorial Manager，请用浏览器工具或 check_paper_status 交互式处理）')
       continue
     }
@@ -903,7 +1661,7 @@ function formatReport(results: JournalResult[], dateStr: string): string {
       const gName = groupOf(sec.name)
       if (gName && gName !== lastGroup) { secLines.push('### ' + gName); lastGroup = gName }
       const subs = sec.submissions ?? []
-      // 决策历史分区：只列最近 7 天内的决策，独立分组，不计入活跃投稿
+      // 决策历史分区：只列最近 7 天内的决策，独立分组，不计入活跃投稿。
       if (sec.kind === 'decision') {
         const recent = recentDecisions(subs, today)
         if (recent.length === 0) continue
@@ -986,14 +1744,10 @@ function tMin(s: string): number {
 }
 
 // ============ 主检查流程 ============
-async function runCheck(config: Config): Promise<JournalResult[]> {
+async function runCheck(config: Config, env?: ScrapeEnv): Promise<JournalResult[]> {
   const results: JournalResult[] = []
   for (const j of config.journals) {
-    if (j.system === 'other') {
-      results.push({ journal: j.name, system: 'other' })
-    } else {
-      results.push(await scrapeEmJournal(j, config.browserPath))
-    }
+    results.push(await scrapeJournal(j, config.browserPath, env))
   }
   return results
 }
@@ -1018,10 +1772,9 @@ function fallbackSessionTitle(session: any): string {
 
 /** 列出当前 live 会话（sessionId + cwd + 标题），供设置面板选择汇报目标。 */
 /**
- * 从设置命名空间重建 provider/模型列表：DSH 0.2 客户端已不再暴露 connection.api.llm.models。
- * 命名空间名（如 llm-deepseek-account）不是 provider id，只有与 agent-default-model 一致的才用真实 id 标注，
- * 其余不猜——错误 id 下发只会让「模型识别」静默失败。
- */
+ * 从设置命名空间重算 provider/模型列表：DSH 0.2 客户端已不再暴露 connection.api.llm.models。
+ * 命名空间名（如 llm-deepseek-account）不是 provider id，只有与 agent-default-model 一致的才用真实 id 标注。
+ * 其余不猜——错的 id 下发只会让「模型识别」静默失败。 */
 function buildModelGroupsPC(settingsService: any): any[] {
   const out: any[] = []
   const seen = new Set<string>()
@@ -1077,10 +1830,9 @@ function cwdFromIndexPC(sessionId: string): string {
 }
 
 /**
- * 列出全部会话：live 的来自 sessions 服务，其余来自 DSH 的会话索引
+ * 列出全部会话：live 的来自 sessions 服务，其余来自 DSH 的会话索引。
  * （~/.dsh/storages/session_projcache/sessions），未打开的标注「（未打开）」。
- * 索引里的 id 保留 'session-' 前缀，才能与 live 会话去重、并直接交给 ensureSession。
- */
+ * 索引里的 id 保留 'session-' 前缀，才能与 live 会话去重、并直接交给 ensureSession。 */
 function listAllSessionsPC(agents: any, sessions: any, sessionTitle: any): any[] {
   const out: any[] = []
   const seen = new Set<string>()
@@ -1144,10 +1896,9 @@ function listLiveSessions(agents: any, sessions: any, sessionTitle: any): any[] 
 
 /** 往指定 live 会话注入一条用户消息（报告），触发 agent 简短确认。返回 'ok' 或失败原因。 */
 /**
- * 往指定会话注入一条用户消息（报告）。会话未打开时用宿主 agents 服务的
+ * 往指定会话注入一条用户消息（报告）。会话未打开时用宿主 agents 服务
  * ensureSession(sessionId, cwd, checkPersistedIdentity) 按需载入（它返回 live agent），
- * 所以目标会话不必提前打开。返回 'ok' 或失败原因。
- */
+ * 所以目标会话不必提前打开。返回 'ok' 或失败原因。 */
 async function reportToSession(agents: any, sessions: any, sessionId: string, report: string): Promise<string> {
   const __pcPre = await (async () => {
     try {
@@ -1182,7 +1933,7 @@ async function reportToSession(agents: any, sessions: any, sessionId: string, re
   const message = createUserMessage({
     content: [{
       type: 'text',
-      text: '⏰ 每日投稿状态自动汇报（插件 dsh-paper-checker）：\n\n' + report +
+      text: '📊 每日投稿状态自动汇报（插件 dsh-paper-checker）：\n\n' + report +
         '\n\n——请一句话确认收到即可，不要重新检查、不要调用工具。',
     }],
     source: { kind: 'user' },
@@ -1192,7 +1943,7 @@ async function reportToSession(agents: any, sessions: any, sessionId: string, re
 }
 
 // ============ 新增期刊自动识别 ============
-/** 用 LLM 生成一段文本（provider/model 可覆盖；为空则读 agent-default-model）。 */
+/** 调 LLM 生成一段文本（provider/model 可覆盖；为空则读 agent-default-model）。 */
 async function callLlmText(llmService: any, settingsService: any, prompt: string, providerOverride?: string, modelOverride?: string): Promise<string> {
   let provider = 'deepseek-official'
   let model = 'deepseek-v4-pro'
@@ -1206,7 +1957,7 @@ async function callLlmText(llmService: any, settingsService: any, prompt: string
     if (modelOverride) {
       model = modelOverride
     } else {
-      // 只指定 provider：取该 provider 目录里的第一个模型，避免错配全局默认的 model
+      // 只指定 provider：取该 provider 目录里的第一个模型，避免错配全局默认的 model。
       try {
         const models = await llmService.listModels(providerOverride)
         if (Array.isArray(models) && models.length > 0) model = models[0].id
@@ -1244,7 +1995,7 @@ async function callLlmText(llmService: any, settingsService: any, prompt: string
   return ''
 }
 
-/** 分析 EM 主菜单文本，识别期刊名 + 系统类型（分区由页面确定性探测提供，不依赖模型，避免漏/错）。 */
+/** 分析 EM 主菜单文本，识别期刊名 + 系统类型（分区由页面确定性探测提供，不依赖模型，避免认错）。 */
 /** LLM 识别出的主菜单组织结构（存进期刊配置的 structure 字段）。 */
 interface MenuStructure {
   name: string
@@ -1255,11 +2006,10 @@ interface MenuStructure {
 
 /**
  * 让 LLM 识别整份主菜单的组织结构：刊名、系统类型、分区清单、分组、每个分区是否值得抓取。
- * 定位：LLM 只做"挑选 + 分类 + 排序"，不做发明与计数——
+ * 定位：LLM 只做"挑名字 + 分类 + 排序"，不做发明与计数——
  *   · 分区名必须逐字来自真实抓到的链接名，本函数会再校验一次，编出来的名字一律丢弃；
- *   · 计数一律使用页面确定性值，不信模型给的数字；
- *   · 模型漏掉但页面确实存在的投稿分区，按旧的确定性规则补在末尾，避免丢分区。
- */
+ *   · 计数一律使用页面确定性值，不信模型给的数字。
+ *   · 模型漏掉但页面确实存在的投稿分区，按旧的确定性规则补在末尾，避免丢分区。 */
 async function analyzeJournalMenu(llmService: any, settingsService: any, baseUrl: string, menu: { title?: string; bodyText?: string; counts?: Record<string, number>; links?: Record<string, string> }, providerOverride?: string, modelOverride?: string): Promise<{ structure?: MenuStructure; error?: string }> {
   const counts = menu.counts ?? {}
   const linkNames = Object.keys(menu.links ?? menu.counts ?? {})
@@ -1339,12 +2089,24 @@ export function apply(ctx: AppContext, config: Config): void {
   const reportDir = () => getConfig().reportDir || defaultReportDir()
   mkdirSync(reportDir(), { recursive: true })
 
-  // 自定义配置 API：绕过 apiproxy 的 settings 白名单（paper-checker 不在 WEB_SETTINGS_NAMESPACES，
-  // 走 describe/mutate 会被 notExposed 拦截），改由 webServer 直连 host 内部 settings 服务。
+  // 自定义配置 API：绕开 apiproxy 的 settings 白名单（paper-checker 不在 WEB_SETTINGS_NAMESPACES，
+  // 所以 describe/mutate 会被 notExposed 拦截），改由 webServer 直连 host 内部 settings 服务。
   let settingsService: any = null
   ctx.inject(['settings'], (sctx: any) => { settingsService = sctx.settings })
   let sessionTitleService: any = null
   ctx.inject(['sessionTitle'], (sctx: any) => { sessionTitleService = sctx.sessionTitle })
+
+  // 第二步（通用抓取器）的 LLM 环境：结构识别与「0 条回退」都走插件已有的 callLlmText，
+  // provider/model 复用面板上的「识别用模型」（discoverProvider / discoverModel）。
+  const pcScrapeEnv = (cfg?: Config): ScrapeEnv => {
+    const c = cfg ?? getConfig()
+    return {
+      llmService: ctx.llm,
+      settingsService,
+      providerOverride: c.discoverProvider || undefined,
+      modelOverride: c.discoverModel || undefined,
+    }
+  }
 
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
@@ -1364,8 +2126,8 @@ export function apply(ctx: AppContext, config: Config): void {
             ok: true,
             config: desc?.value ?? getConfig(),
             revision: desc?.revision ?? 0,
-            // 面板要的会话列表与 provider/模型列表统一随 /config 下发：客户端在 0.2 拿不到
-            // llm.models，/sessions 路径在渲染进程里也会静默失败。
+            // 面板要的会话列表、provider/模型列表统一由 /config 下发：客户端 0.2 拿不到
+            // llm.models，sessions 路径在渲染进程里也会静默失败。
             sessions: (() => { try { return listAllSessionsPC(ctx.agents, ctx.sessions, sessionTitleService) } catch { return [] } })(),
             modelGroups: (() => { try { return buildModelGroupsPC(settingsService) } catch { return [] } })(),
           })
@@ -1379,12 +2141,12 @@ export function apply(ctx: AppContext, config: Config): void {
           const expectedRevision = body?.expectedRevision
           if (!settingsService?.mutate) return send(500, { ok: false, error: 'settings 服务不可用' })
           // DSH 的 mutate 是**字段级编辑**（docs: ordered form edits）——单个根 op（path: []）会被静默丢弃，
-          // 表现为"返回 ok、revision 递增、值不变"。这里改为逐字段 op。
+          // 表现是返回 ok、revision 递增、值不变。这里改为逐字段 op。
           const opsPC = Object.keys(value ?? {}).map((k: string) => ({ op: 'set', path: [k], value: (value as any)[k] }))
           await settingsService.mutate('paper-checker', opsPC.length ? opsPC : [{ op: 'set', path: [], value }], expectedRevision)
           const desc = settingsService.describe().find((d: any) => d.ns === 'paper-checker')
           // 写后回读校验：DSH 的写入是字段级 volatile 判定，非 volatile 字段会被静默丢弃。
-          // 这里逐字段比对（journals 因 schema 会补默认值而跳过深比），不一致就报错，避免"假成功"。
+          // 这里逐字段比对（journals 的 schema 会补默认值而跳过深比），不一致就报错，避免假成功。
           const afterValue: any = (desc?.value ?? {}) as any
           const notWritten: string[] = []
           for (const k of Object.keys(value ?? {})) {
@@ -1396,10 +2158,10 @@ export function apply(ctx: AppContext, config: Config): void {
         }
         if (req.method === 'POST' && p === '/run') {
           const cfgRun = getConfig()
-          const results = await runCheck(cfgRun)
+          const results = await runCheck(cfgRun, pcScrapeEnv(cfgRun))
           const dateStr = new Date().toISOString().slice(0, 10)
           const reportRun = formatReport(results, dateStr)
-          // 立即检查同样汇报到对话（原先只有定时检查会汇报）
+          // 立即检查同样汇报到对话（原先只有定时检查会汇报）。
           let deliver = ''
           if (cfgRun.reportSessionId) {
             try { deliver = await reportToSession(ctx.agents, ctx.sessions, cfgRun.reportSessionId, reportRun) } catch (e) { deliver = '汇报异常: ' + String(e) }
@@ -1412,7 +2174,7 @@ export function apply(ctx: AppContext, config: Config): void {
           let report = ''
           try { report = readFileSync(join(dir, 'latest.md'), 'utf8') } catch { /* 无最近报告 */ }
           if (!report) {
-            const results = await runCheck(cfg)
+            const results = await runCheck(cfg, pcScrapeEnv(cfg))
             report = formatReport(results, new Date().toISOString().slice(0, 10))
           }
           const r = await reportToSession(ctx.agents, ctx.sessions, cfg.reportSessionId, report)
@@ -1434,13 +2196,56 @@ export function apply(ctx: AppContext, config: Config): void {
             structure: one.structure,
           }
           const dateOne = new Date().toISOString().slice(0, 10)
-          const rOne: any = jOne.system === 'other' ? { journal: jOne.name, system: 'other' } : await scrapeEmJournal(jOne, cfgOne.browserPath)
+          const rOne: any = await scrapeJournal(jOne, cfgOne.browserPath, pcScrapeEnv(cfgOne))
           const reportOne = formatReport([rOne], dateOne)
           let deliverOne = ''
           if (cfgOne.reportSessionId) {
             try { deliverOne = await reportToSession(ctx.agents, ctx.sessions, cfgOne.reportSessionId, reportOne) } catch (e) { deliverOne = '汇报异常: ' + String(e) }
           }
           return send(200, { ok: true, report: reportOne, single: true, deliver: deliverOne })
+        }
+        // 人工登录一次（B 方案）：用共享 profile 打开有头浏览器，用户自己完成 ORCID / 学校 SSO 登录。
+        // 登录态落到 ~/.dsh/paper-checker/browser-profile，之后的无头抓取直接复用 cookie。
+        // 登录成功后顺手把页面结构交给模型识别（投稿系统 / 列表入口 / 字段选择器），落盘 structures/<key>.json。
+        if (req.method === 'POST' && p === '/login-once') {
+          const body = JSON.parse(await readBody(req))
+          const baseUrl = String(body?.baseUrl ?? '').trim().replace(/\/+$/, '').replace(/\/default\.aspx$/i, '').replace(/\/+$/, '')
+          const journalName = String(body?.journalName ?? '').trim()
+          if (!baseUrl) return send(400, { ok: false, error: '缺少 baseUrl（期刊入口网址）' })
+          if (__pcLoginOnceBusy) return send(409, { ok: false, error: '已有一个登录窗口在等待完成，请先在那个窗口里登录或把它关掉' })
+          __pcLoginOnceBusy = true
+          try {
+            log(reportDir(), '登录一次开始 baseUrl=' + baseUrl)
+            const envOnce = pcScrapeEnv()
+            const rOnce = await loginOnce(baseUrl, getConfig().browserPath, async (ctxAny: any, finalUrl: string) => {
+              return await pcRecognizeStructure({
+                baseUrl,
+                journalName,
+                ctxAny,
+                llmService: ctx.llm,
+                settingsService,
+                providerOverride: envOnce.providerOverride,
+                modelOverride: envOnce.modelOverride,
+              })
+            })
+            const rec: any = (rOnce as any).structure ?? null
+            const plan: any = rec?.plan ?? null
+            const planPath = String(rec?.planPath ?? '')
+            const planError = rec?.error ? String(rec.error) : ''
+            log(reportDir(), '登录一次结束 ok=' + rOnce.ok + ' finalUrl=' + (rOnce.finalUrl ?? '') + ' waitedMs=' + (rOnce.waitedMs ?? 0) +
+              ' system=' + String(plan?.system ?? '') + ' conf=' + String(plan?.confidence ?? '') + (planError ? ' planError=' + planError : ''))
+            return send(200, {
+              ok: rOnce.ok,
+              finalUrl: rOnce.finalUrl ?? '',
+              waitedMs: rOnce.waitedMs ?? 0,
+              plan: plan ? { system: plan.system, confidence: plan.confidence, listUrl: plan.listUrl, fields: plan.fields } : null,
+              planPath,
+              planError,
+              profileDir: pcProfileDir(),
+            })
+          } finally {
+            __pcLoginOnceBusy = false
+          }
         }
         if (req.method === 'POST' && p === '/discover') {
           const body = JSON.parse(await readBody(req))
@@ -1451,22 +2256,22 @@ export function apply(ctx: AppContext, config: Config): void {
           const menu = await loginAndGetMenu(baseUrl, username, password, getConfig().browserPath)
           if (menu.error) return send(200, { ok: false, error: menu.error })
           // 分区以页面确定性探测为准：主菜单里全部带计数分区（含 count=0，按菜单顺序），
-          // 这就是「网站有哪些分区」的结构——保存后每次检查时配置优先抓取，
+          // 这就是「网站有哪些分区」的结构——保存后每次检查时配置优先抓取。
           // count=0 的分区自动跳过，将来一有稿件（count>0）即被抓取，无需再手动维护。
           // 排除 with Production Completed（已完成历史归档）与 Task Assignments（EM 任务功能区，非投稿分区）。
           // 交给 LLM 识别整份主菜单的组织结构（分区清单 / 分组 / 是否抓取 / kind）。
-          // 确定性探测仍然负责两件事：给出"真实存在的链接名"白名单、以及页面上的计数。
+          // 确定性探测仍然负责两件事：给出真实存在的链接名"白名单、以及页面上的计数。
           const cfgNow = getConfig()
           const parsed = await analyzeJournalMenu(ctx.llm, settingsService, baseUrl, menu, cfgNow.discoverProvider, cfgNow.discoverModel)
           const st = parsed.structure
           const detSections = Object.keys(menu.counts).filter((k) => !/with production completed|task assignment/i.test(k))
-          // 分区顺序：完全按 LLM 给出的顺序；模型失败则回落到旧的确定性顺序
+          // 分区顺序：完全按 LLM 给出的顺序；模型失败则回落到旧的确定性顺序。
           const sections = st ? st.sections.filter((s) => s.check).map((s) => s.name) : detSections
           let name = menu.title?.trim() || ''
           const titleGeneric = !name || name.length < 3 || /editorial manager|author main menu|main menu|welcome/i.test(name)
           if (titleGeneric && st?.name) name = st.name
           if (!name) name = new URL(baseUrl).hostname.replace(/^www\./, '').replace(/\.editorialmanager\.com$/, '')
-          // 本次登录走的是 EM 流程，运行路径仍是 editorial-manager；模型判定的系统类型记录在
+          // 本次登录走的是 EM 流程，运行路径仍是 editorial-manager；模型判定的系统类型记录到
           // structure.system 里，供将来接入别的投稿系统时使用。
           const system = 'editorial-manager'
           const structure = st
@@ -1484,9 +2289,9 @@ export function apply(ctx: AppContext, config: Config): void {
   // 工具：按需检查
   const disposeTool = ctx.tools.register(defineTool({
     name: 'check_paper_status',
-    description: '检查配置的学术期刊投稿审稿状态（Editorial Manager 期刊确定性抓取；其他系统返回回退信号，请改用浏览器工具手动检查）。',
+    description: '检查配置的学术期刊投稿审稿状态（Editorial Manager 期刊确定性抓取；其他系统返回回退信号，请改用浏览器工具手动检查）',
     parameters: {
-      journal_name: { type: 'string', description: '可选：只检查指定期刊名；缺省检查全部配置期刊。' },
+      journal_name: { type: 'string', description: '可选：只检查指定期刊名；缺省检查全部配置期刊' },
     },
     output: {
       schema: { type: 'string' },
@@ -1497,8 +2302,8 @@ export function apply(ctx: AppContext, config: Config): void {
       const journals = args.journal_name
         ? cfg.journals.filter((j) => j.name === args.journal_name)
         : cfg.journals
-      if (journals.length === 0) return '没有匹配的期刊配置。'
-      const results = await runCheck({ ...cfg, journals })
+      if (journals.length === 0) return '没有匹配的期刊配置'
+      const results = await runCheck({ ...cfg, journals }, pcScrapeEnv(cfg))
       const dateStr = new Date().toISOString().slice(0, 10)
       const report = formatReport(results, dateStr)
       return report
@@ -1507,8 +2312,8 @@ export function apply(ctx: AppContext, config: Config): void {
   }))
   ctx.effect(() => disposeTool, 'paper-checker: tool')
 
-  // 守护定时：每天到点自动检查（配置变化后下次 tick 自动用新值）
-  // 触发条件：当天还没跑过，且当前时刻已到目标时刻 —— DSH 在目标时刻未运行(关机/休眠/晚启动)时，启动后自动补跑当天检查
+  // 守护定时：每天到点自动检查（配置变化后下一 tick 自动用新值）。
+  // 触发条件：当天还没跑过，且当前时刻已到目标时间——DSH 在目标时刻未运行(关机/休眠/晚启动)时，启动后自动补跑当天检查。
   let lastRunDate = ''
   ctx.setInterval(() => {
     void (async () => {
@@ -1519,13 +2324,13 @@ export function apply(ctx: AppContext, config: Config): void {
         lastRunDate = date
         const dir = cfg.reportDir || defaultReportDir()
         log(dir, '定时检查开始 date=' + date + ' time=' + time)
-        const results = await runCheck(cfg)
+        const results = await runCheck(cfg, pcScrapeEnv(cfg))
         const report = formatReport(results, date)
         writeFileSync(join(dir, `report-${date}.md`), report, 'utf8')
         writeFileSync(join(dir, 'latest.md'), report, 'utf8')
         if (cfg.serverchanKey) {
           const ok = await pushServerChan(cfg.serverchanKey, `📊 投稿状态报告 (${date})`, report)
-          log(dir, '微信推送: ' + (ok ? '成功' : '失败'))
+          log(dir, '微信推送 ' + (ok ? '成功' : '失败'))
         }
         if (cfg.reportSessionId) {
           const r = await reportToSession(ctx.agents, ctx.sessions, cfg.reportSessionId, report)
@@ -1537,3 +2342,4 @@ export function apply(ctx: AppContext, config: Config): void {
   }, 30000)
   ctx.logger?.info?.('[@dsh-external/dsh-paper-checker] 守护定时启动（每天 ' + getConfig().time + ' ' + getConfig().timezone + '）')
 }
+

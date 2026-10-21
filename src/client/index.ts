@@ -39,6 +39,13 @@ function PaperCheckerPanel(props: any): any {
   const [discoveredName, setDiscoveredName] = React.useState<string>('')
   const [discoverMsg, setDiscoverMsg] = React.useState<string>('')
   const [modelGroups, setModelGroups] = React.useState<any[]>([])
+  // 「登录一次」（B 方案）：有头浏览器里人工完成 ORCID / SSO 登录，cookie 存进持久化 profile
+  const [loginUrl, setLoginUrl] = React.useState<string>('')
+  const [loginBusy, setLoginBusy] = React.useState<boolean>(false)
+  const [loginMsg, setLoginMsg] = React.useState<string>('')
+  const [loginOk, setLoginOk] = React.useState<boolean>(false)
+  // 登录成功后模型识别出的投稿系统结构（editorial-manager / scholarone / …）
+  const [loginPlan, setLoginPlan] = React.useState<any>(null)
 
   const loadSessions = React.useCallback(() => {
     // 服务端把会话列表搭在 /config 上返回（/sessions 在渲染进程里会静默失败）
@@ -162,6 +169,33 @@ function PaperCheckerPanel(props: any): any {
     try { const a = JSON.parse(journalsText); return Array.isArray(a) ? a : [] } catch { return [] }
   })()
   const journalsInvalid = (() => { if (journalsText.trim() === '') return false; try { return !Array.isArray(JSON.parse(journalsText)) } catch { return true } })()
+
+  // [modified] 不再自动填入：入口网址保持空白，由用户手动填写（新增期刊场景）；也可用下面的下拉快速填入已有期刊
+
+  const loginOnce = async () => {
+    const target = (loginUrl || '').trim()
+    if (!target) { setLoginMsg('请先填写期刊入口网址（或从已添加期刊里选一个）'); return }
+    setLoginBusy(true); setLoginOk(false); setLoginPlan(null)
+    setLoginMsg('登录中… 请在打开的窗口里完成登录（最多等 10 分钟）')
+    // 顺手把期刊名带上，识别结果落到 structures/<key>.json 时能对上配置里的期刊
+    const hit = (Array.isArray(journalItems) ? journalItems : []).find((j2: any) => String(j2?.baseUrl ?? '').replace(/\/+$/, '') === target.replace(/\/+$/, ''))
+    const journalName = String(hit?.name ?? '')
+    try {
+      const res = await fetchJson('/login-once', { method: 'POST', body: JSON.stringify({ baseUrl: target, journalName }) })
+      if (res.ok) {
+        setLoginOk(true)
+        setLoginPlan(res.plan ?? null)
+        const errLine = res.planError ? '；结构识别未完成: ' + res.planError : ''
+        setLoginMsg('登录成功 ✓ 登录态已保存（' + (res.finalUrl ?? '') + '，用时 ' + Math.round((res.waitedMs ?? 0) / 1000) + 's）；之后的无头检查会复用这份 cookie' + errLine)
+      } else {
+        setLoginMsg('登录未完成: ' + (res.error ?? '未知错误'))
+      }
+    } catch (e) {
+      setLoginMsg('登录异常: ' + String(e))
+    } finally {
+      setLoginBusy(false)
+    }
+  }
   const removeJournal = (idx: number) => {
     const next = journalItems.slice()
     const removed = next[idx]
@@ -256,6 +290,36 @@ function PaperCheckerPanel(props: any): any {
         React.createElement('button', { style: s.btn, type: 'button', onClick: loadSessions }, '刷新'),
       ),
       React.createElement('div', { style: s.hint }, '只列出当前已打开的会话；若目标会话未打开，定时汇报会跳过对话（微信照常推送）。'),
+    ),
+    React.createElement('div', { style: { ...s.row, border: '1px dashed var(--dsw-alias-border-l1, #ccc)', borderRadius: 8, padding: 10 } },
+      React.createElement('label', { style: s.label }, '🔐 登录一次（ORCID / 学校 SSO / 账号密码）'),
+      // [modified] 手动填写优先：新增期刊时直接在这里粘贴入口网址
+      React.createElement('input', {
+        style: { ...s.input, marginBottom: 6 },
+        placeholder: '手动填写期刊入口网址（新增期刊时直接粘贴这里），如 https://accounts.taylorfrancis.com/identity/#/login…',
+        value: loginUrl,
+        onChange: (e: any) => setLoginUrl(e.target.value),
+      }),
+      React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center' } },
+        React.createElement('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary, #999)', whiteSpace: 'nowrap' } }, '快速填入已添加期刊：'),
+        React.createElement('select', {
+          style: { ...s.input, flex: 1 },
+          value: '',
+          onChange: (e: any) => { const v = e.target.value; if (v) setLoginUrl(v) },
+        },
+          React.createElement('option', { value: '' }, '(可选) 从已添加期刊里选一个…'),
+          ...journalItems.map((j2: any, i: number) => React.createElement('option', { key: 'loginopt' + i, value: String(j2?.baseUrl ?? '') }, (j2?.name || '(未命名)') + ' · ' + String(j2?.baseUrl ?? ''))),
+        ),
+      ),
+      React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+        React.createElement('button', { style: s.btn, type: 'button', onClick: loginOnce, disabled: loginBusy }, loginBusy ? '登录中…（最多 10 分钟）' : '登录一次（ORCID/SSO）'),
+        loginMsg ? React.createElement('span', { style: { fontSize: 11, color: loginOk ? 'var(--dsw-alias-label-secondary, #888)' : 'var(--dsw-alias-label-tertiary, #999)' } }, loginMsg) : null,
+      ),
+      loginPlan ? React.createElement('div', { style: { fontSize: 12, marginTop: 4, color: 'var(--dsw-alias-label-secondary, #666)', wordBreak: 'break-all' } },
+        '已识别系统：' + String(loginPlan.system || 'other') + '（置信度 ' + (Number(loginPlan.confidence ?? 0) || 0).toFixed(2) + '）/ 抓取入口：' + (loginPlan.listUrl || '(未识别到列表页，可再点一次登录)'),
+      ) : null,
+      React.createElement('div', { style: s.hint },
+        '点按钮会弹出一个有头浏览器窗口：在里面手动完成 ORCID / 学校 SSO / 账号密码登录，检测到登录成功后窗口自动关闭，cookie 存到 ~/.dsh/paper-checker/browser-profile。登录成功后会自动识别该投稿系统的结构（系统类型 / 投稿列表入口 / 字段选择器），存到 ~/.dsh/paper-checker/structures/<站点>.json：Editorial Manager 仍走原有确定性抓取，其他系统改用通用抓取器（先按选择器抓，抓不到再把页面文本交给模型抽取）。之后的定时检查直接复用这份登录态。登录态过期时再点一次即可。'),
     ),
     React.createElement('div', { style: { ...s.row, border: '1px dashed var(--dsw-alias-border-l1, #ccc)', borderRadius: 8, padding: 10 } },
       React.createElement('label', { style: s.label }, '➕ 新增期刊（输入网址 + 账号密码，自动登录并识别）'),
