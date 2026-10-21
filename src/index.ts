@@ -1434,6 +1434,16 @@ async function pcExtractByLlm(pg: any, plan: StructurePlan, opts: {
 }
 
 /** 通用抓取器：非 EM 系统走这里（DOM 优先，0 条回退 LLM），status 里带上识别到的系统名。 */
+/** 等列表行出现：命中即返回 true；超时返回 false（不抛）。 */
+async function pg0WaitRows(page: any, sel: string, ms: number): Promise<boolean> {
+    try {
+        await page.waitForSelector(sel, { timeout: ms });
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
 async function scrapeGenericJournal(j: JournalConfig, plan: StructurePlan, opts: ScrapeEnv & {
   browserPath?: string
 }): Promise<JournalResult> {
@@ -1462,7 +1472,15 @@ async function scrapeGenericJournal(j: JournalConfig, plan: StructurePlan, opts:
           '；已复用登录态：' + pcProfileDir() + '（如过期请再点一次「登录一次」）',
       }
     }
-    await new Promise((r) => setTimeout(r, 1200))
+    // [local patch 2026-10-22d] 等列表真正渲染出来（很多投稿系统是前端框架，domcontentloaded 时行还没出来）
+    try {
+        const rowSel0 = String(plan?.rowSelector || "").trim();
+        if (rowSel0) await pg0WaitRows(page, rowSel0, 20000);
+        else await new Promise((r) => setTimeout(r, 3000));
+    }
+    catch {
+        await new Promise((r) => setTimeout(r, 2500));
+    }
     let subs: Submission[] = []
     let how = 'DOM 选择器'
     try {
