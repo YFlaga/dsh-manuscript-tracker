@@ -42,6 +42,8 @@ function PaperCheckerPanel(props: any): any {
   // 登录一次时顺手记录到的账号密码（存进期刊条目，cookie 过期可自动重登）
   const [loginCreds, setLoginCreds] = React.useState<any>(null)
   const [loginTrace, setLoginTrace] = React.useState<any[]>([])
+  const [traceFilled, setTraceFilled] = React.useState<number>(-1)
+  const [traceCopied, setTraceCopied] = React.useState<number>(-1)
   // [patch 2026-10-22d] 登录轨迹里发现的真实投稿系统网址（用户填的常是登录门户）
   const [loginBestUrl, setLoginBestUrl] = React.useState<string>('')
   // 已经登录过（页面直接进后台、没有密码表单）时自动记录拿不到凭据：允许手动补录，跟条目一起保存
@@ -358,14 +360,24 @@ function PaperCheckerPanel(props: any): any {
       loginPlan ? React.createElement('div', { style: { fontSize: 12, marginBottom: 6, color: 'var(--dsw-alias-label-secondary, #666)', wordBreak: 'break-all' } },
         '已识别系统：' + String(loginPlan.system || 'other') + '（置信度 ' + (Number(loginPlan.confidence ?? 0) || 0).toFixed(2) + '）/ 抓取入口：' + (loginPlan.listUrl || '(未识别到列表页，可再登录一次)'),
       ) : null,
-      loginTrace.length ? React.createElement('div', { style: { marginBottom: 6, maxHeight: 150, overflow: 'auto', border: '1px solid var(--dsw-alias-border-l1, #ccc)', borderRadius: 6, padding: 6, fontSize: 11, lineHeight: 1.5 } },
-        React.createElement('div', { style: { ...s.hint, marginBottom: 3 } }, '你在登录窗口里访问过的页面（按时间顺序；点一条把它填成入口网址）：'),
-        ...loginTrace.map((p: any, i: number) => React.createElement('div', {
-          key: i,
-          style: { wordBreak: 'break-all', cursor: 'pointer', color: (loginPlan && String(loginPlan.listUrl) === String(p.url)) ? 'var(--dsw-alias-label-primary, #222)' : 'var(--dsw-alias-label-secondary, #777)' },
-          title: String(p.title ?? '') + '（点击填入入口网址）',
-          onClick: () => { const u = String(p.url ?? ''); setLoginUrl(u); setDUrl(u) },
-        }, (p.at != null ? String(p.at) + 's  ' : '') + String(p.url ?? ''))),
+      loginTrace.length ? React.createElement('div', { style: { marginBottom: 6, maxHeight: 240, overflow: 'auto', border: '1px solid var(--dsw-alias-border-l1, #ccc)', borderRadius: 6, padding: 6, fontSize: 11, lineHeight: 1.5 } },
+        React.createElement('div', { style: { ...s.hint, marginBottom: 4 } }, '你在登录窗口里访问过的页面（按时间顺序）。点「填入」把它设为期刊入口网址；网址文字也可以直接拖选复制：'),
+        ...loginTrace.map((p: any, i: number) => React.createElement('div', { key: i, style: { display: 'flex', gap: 6, alignItems: 'flex-start', marginBottom: 3 } },
+          React.createElement('button', {
+            onClick: () => { const u = String(p.url ?? ''); setLoginUrl(u); setDUrl(u); setTraceFilled(i) },
+            style: { flexShrink: 0, padding: '1px 8px', fontSize: 11, borderRadius: 6, border: '1px solid var(--dsw-alias-border-l1, #ccc)', background: 'transparent', cursor: 'pointer', color: 'inherit' },
+            title: '设为期刊入口网址',
+          }, traceFilled === i ? '\u2713 已填入' : '填入'),
+          React.createElement('button', {
+            onClick: () => { const u = String(p.url ?? ''); try { void navigator.clipboard?.writeText(u) } catch {} setTraceCopied(i) },
+            style: { flexShrink: 0, padding: '1px 8px', fontSize: 11, borderRadius: 6, border: '1px solid var(--dsw-alias-border-l1, #ccc)', background: 'transparent', cursor: 'pointer', color: 'inherit' },
+            title: '复制这条网址',
+          }, traceCopied === i ? '已复制' : '复制'),
+          React.createElement('span', {
+            style: { wordBreak: 'break-all', userSelect: 'text', cursor: 'text', color: (loginPlan && String(loginPlan.listUrl) === String(p.url)) ? 'var(--dsw-alias-label-primary, #222)' : 'var(--dsw-alias-label-secondary, #777)' },
+            title: String(p.title ?? ''),
+          }, (p.at != null ? String(p.at) + 's  ' : '') + String(p.url ?? '')),
+        )),
       ) : null,
       loginCreds && loginCreds.password
         ? React.createElement('div', { style: { fontSize: 11, marginBottom: 6, color: 'var(--dsw-alias-label-secondary, #888)' } },
