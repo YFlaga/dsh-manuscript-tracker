@@ -879,6 +879,10 @@ function pcWriteStructureAt(baseUrl: string, plan: any): string {
 		return "";
 	}
 }
+/** [patch 2026-10-22e] host service refs captured while the context is active (the timer context is inactive) */
+let __pcSCRef: any = null
+let __pcAgentsRef: any = null
+let __pcSessionsRef: any = null
 let __pcLoginOnceBusy = false
 /** 人工登录一次：有头窗口打开期刊入口，等用户自己完成 ORCID / SSO / 表单登录。
  *  登录态（cookie）随 profile 落盘，之后的无头抓取直接复用。 */
@@ -2247,6 +2251,16 @@ function listLiveSessions(agents: any, sessions: any, sessionTitle: any): any[] 
  * ensureSession(sessionId, cwd, checkPersistedIdentity) 按需载入（它返回 live agent），
  * 所以目标会话不必提前打开。返回 'ok' 或失败原因。 */
 async function reportToSession(agents: any, sessions: any, sessionId: string, report: string): Promise<string> {
+  // [patch 2026-10-22e] public host entry: sessionController.prompt resumes a cold session then followup
+  try {
+    const __sc0: any = (__pcSCRef as any) || ((__pcCtx && typeof (__pcCtx as any).get === "function") ? (__pcCtx as any).get("sessionController") : null)
+    if (__sc0 && typeof __sc0.prompt === "function" && sessionId) {
+      await __sc0.prompt({ sessionId, content: [{ type: "text", text: "\u23f0 \u6bcf\u65e5\u6295\u7a3f\u72b6\u6001\u81ea\u52a8\u6c47\u62a5\uff08\u63d2\u4ef6 dsh-paper-checker\uff09\uff1a\n\n" + report + "\n\n\u2014\u2014\u8bf7\u4e00\u53e5\u8bdd\u786e\u8ba4\u6536\u5230\u5373\u53ef\uff0c\u4e0d\u8981\u91cd\u65b0\u68c0\u67e5\u3001\u4e0d\u8981\u8c03\u7528\u5de5\u5177\u3002" }] }, { kind: "user" })
+      return "ok"
+    }
+  } catch (e) {
+    try { log(defaultReportDir(), "[delivery] prompt channel failed: " + String(e).slice(0, 200)) } catch {}
+  }
   const __pcPre = await (async () => {
     try {
       const quick = (agents && typeof agents.get === "function") ? agents.get(sessionId) : null;
@@ -2438,6 +2452,10 @@ export function apply(ctx: AppContext, config: Config): void {
   })
 
   const reportDir = () => getConfig().reportDir || defaultReportDir()
+  // [patch 2026-10-22e] capture service refs while active
+  try { __pcSCRef = ctx.get("sessionController") } catch {}
+  try { __pcAgentsRef = ctx.agents } catch {}
+  try { __pcSessionsRef = ctx.sessions } catch {}
   mkdirSync(reportDir(), { recursive: true })
 
   // 自定义配置 API：绕开 apiproxy 的 settings 白名单（paper-checker 不在 WEB_SETTINGS_NAMESPACES，
@@ -2545,7 +2563,7 @@ export function apply(ctx: AppContext, config: Config): void {
           // 立即检查同样汇报到对话（原先只有定时检查会汇报）。
           let deliver = ''
           if (cfgRun.reportSessionId) {
-            try { deliver = await reportToSession(ctx.agents, ctx.sessions, cfgRun.reportSessionId, reportRun) } catch (e) { deliver = '汇报异常: ' + String(e) }
+            try { deliver = await reportToSession(__pcAgentsRef || ctx.agents, __pcSessionsRef || ctx.sessions, cfgRun.reportSessionId, reportRun) } catch (e) { deliver = '汇报异常: ' + String(e) }
           }
           return send(200, { ok: true, report: reportRun, deliver })
         }
@@ -2558,7 +2576,7 @@ export function apply(ctx: AppContext, config: Config): void {
             const results = await runCheck(cfg, pcScrapeEnv(cfg))
             report = formatReport(results, new Date().toISOString().slice(0, 10))
           }
-          const r = await reportToSession(ctx.agents, ctx.sessions, cfg.reportSessionId, report)
+          const r = await reportToSession(__pcAgentsRef || ctx.agents, __pcSessionsRef || ctx.sessions, cfg.reportSessionId, report)
           return send(200, { ok: true, result: r })
         }
         // 只检查一条期刊（面板「检查这一本」用）：不影响整轮检查，便于逐条排障。
@@ -2581,7 +2599,7 @@ export function apply(ctx: AppContext, config: Config): void {
           const reportOne = formatReport([rOne], dateOne)
           let deliverOne = ''
           if (cfgOne.reportSessionId) {
-            try { deliverOne = await reportToSession(ctx.agents, ctx.sessions, cfgOne.reportSessionId, reportOne) } catch (e) { deliverOne = '汇报异常: ' + String(e) }
+            try { deliverOne = await reportToSession(__pcAgentsRef || ctx.agents, __pcSessionsRef || ctx.sessions, cfgOne.reportSessionId, reportOne) } catch (e) { deliverOne = '汇报异常: ' + String(e) }
           }
           return send(200, { ok: true, report: reportOne, single: true, deliver: deliverOne })
         }
@@ -2716,7 +2734,7 @@ export function apply(ctx: AppContext, config: Config): void {
           log(dir, '微信推送 ' + (ok ? '成功' : '失败'))
         }
         if (cfg.reportSessionId) {
-          const r = await reportToSession(ctx.agents, ctx.sessions, cfg.reportSessionId, report)
+          const r = await reportToSession(__pcAgentsRef || ctx.agents, __pcSessionsRef || ctx.sessions, cfg.reportSessionId, report)
           log(dir, '对话汇报: ' + r)
         }
         log(dir, '定时检查完成')
