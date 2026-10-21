@@ -397,7 +397,7 @@ function PaperCheckerPanel(props: any): any {
         }),
         React.createElement('input', {
           style: s.input,
-          placeholder: '密码（明文显示，方便核对；只存在本机插件配置里）',
+          placeholder: '密码',
           type: showPass ? 'text' : 'password',
           value: manualPass,
           onChange: (e: any) => setManualPass(e.target.value),
@@ -409,8 +409,7 @@ function PaperCheckerPanel(props: any): any {
             style: { color: 'var(--dsw-alias-brand, #3b82f6)' },
             onClick: (e: any) => { e.preventDefault(); setShowPass((v: boolean) => !v) },
           }, showPass ? '隐藏密码' : '显示密码'),
-          React.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary, #888)', marginLeft: 6 } },
-            '（这一步明文是为了让你核对账号密码，确认无误再点「加入期刊列表（立刻保存）」）'),
+          // [patch 2026-10-22n] 用户要求删掉这行小字说明
         ),
       ) : null,
       loginOk && !loginPlan ? React.createElement('div', { style: { fontSize: 11, marginBottom: 4, color: 'var(--dsw-alias-label-tertiary, #999)' } }, '结构识别没成功，但仍可先加入列表（抓取时会再试一次识别；也可以回去重新选识别模型后再登录一次）。') : null,
