@@ -821,15 +821,75 @@ function pcHeadedExeCandidates(browserPath?: string): (string | undefined)[] {
   return out
 }
 
+/** [local patch 2026-10-22d] 网址是不是「登录 / 统一身份门户」页（这类页没有稿件列表，不能当期刊入口） */
+function pcIsLoginishUrl(u: string): boolean {
+	const s0 = String(u || "").toLowerCase();
+	if (!s0) return true;
+	return /(orcid\.org|accounts\.taylorfrancis\.com|\/identity(\/|$|\?)|login\.microsoftonline|\/login(\/|$|\?)|\/signin|\/sign-in|\/oauth(\/|$|\?)|\/sso(\/|$|\?)|[?&]pg=login)/.test(s0);
+}
+/** [local patch 2026-10-22d] 从登录轨迹里挑出真正的投稿系统网址：命中已知投稿系统主机、且不是登录页的优先 */
+function pcTraceBestUrl(entered: string, urls: string[]): string {
+	let inHost = "";
+	try {
+		inHost = new URL(String(entered || "")).hostname.toLowerCase();
+	} catch {}
+	let best = "";
+	let bestScore = -1;
+	for (const raw of urls || []) {
+		const u = String(raw || "");
+		if (!/^https?:\/\//i.test(u)) continue;
+		if (pcIsLoginishUrl(u)) continue;
+		let host = "";
+		let path = "/";
+		try {
+			const o = new URL(u);
+			host = o.hostname.toLowerCase();
+			path = (o.pathname || "/").toLowerCase();
+		} catch {
+			continue;
+		}
+		let score = 10;
+		if (/^rp\.tandfonline\.com$/.test(host)) score = /dashboard/.test(path) ? 120 : 100;
+		else if (/editorialmanager\.com$/.test(host)) score = /(login\.asp|pg=login)/i.test(u) ? 20 : 110;
+		else if (/manuscriptcentral\.com$/.test(host)) score = 105;
+		else if (/^snapp|snapp\./.test(host)) score = 95;
+		else if (/scholarone/.test(host)) score = 90;
+		else if (host && host !== inHost) score = 30;
+		if (score > bestScore) {
+			bestScore = score;
+			best = u;
+		}
+	}
+	return bestScore >= 30 ? best : "";
+}
+/** [local patch 2026-10-22d] 把 plan 写到指定 baseUrl 名下（key 由 baseUrl 决定） */
+function pcWriteStructureAt(baseUrl: string, plan: any): string {
+	try {
+		const p = pcStructurePath(baseUrl);
+		mkdirSync(pcStructuresDir(), {
+			recursive: true
+		});
+		writeFileSync(p, JSON.stringify({
+			baseUrl,
+			plan,
+			capturedAt: new Date().toISOString()
+		}, null, 2), "utf8");
+		return p;
+	} catch (e) {
+		return "";
+	}
+}
 let __pcLoginOnceBusy = false
 /** 人工登录一次：有头窗口打开期刊入口，等用户自己完成 ORCID / SSO / 表单登录。
  *  登录态（cookie）随 profile 落盘，之后的无头抓取直接复用。 */
-async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ctxAny: any, finalUrl: string) => Promise<any>): Promise<{
+async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ctxAny: any, finalUrl: string, keyUrl?: string) => Promise<any>): Promise<{
   ok: boolean; finalUrl?: string; waitedMs?: number; error?: string; profileDir?: string; structure?: any
   /** [local patch 2026-10-22] 登录窗口里所有页面轨迹（at=第几秒 / url / title） */
   pages?: Array<{ at?: number; url: string; title: string }>
   /** 识别出的稿件列表入口（plan.listUrl） */
   planAt?: string
+  /** [local patch 2026-10-22d] 轨迹里找到的真实投稿系统网址 */
+  bestUrl?: string
   /** 是否是用户手动关掉浏览器结束的 */
   closedByUser?: boolean
   /** 轮询期间顺手记录的账号密码（cookie 过期时重新登录用） */
@@ -905,6 +965,7 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 		let attempts = 0;
 		let lastTryAt = 0;
 		let lastTryKey = "";
+		let bestHint = ""
 		const tryRecognize = async (why: string) => {
 			if (structure && structure.plan) return;
 			const cb = onLoggedIn;
@@ -916,7 +977,7 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 			lastTryKey = pagesNow.slice().sort().join("\n");
 			log(defaultReportDir(), "登录追踪识别 #" + attempts + "（" + why + "）pages=" + pagesNow.length);
 			try {
-				const rec = await cb(ctx, pagesNow[0] || baseUrl);
+				const rec = await cb(ctx, pagesNow[0] || baseUrl, bestHint);
 				if (rec && rec.plan) {
 					structure = rec;
 					planAt = String(rec.plan?.listUrl || "");
@@ -1017,6 +1078,34 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 				__pcTracePush(u, t);
 			}
 		} catch {}
+		let bestUrl = pcTraceBestUrl(baseUrl, TRACE.map((x) => x.url))
+		bestHint = bestUrl
+		if (!bestUrl && structure && structure.plan) {
+			const lu0 = String(structure.plan.listUrl || "")
+			if (lu0 && !pcIsLoginishUrl(lu0)) bestUrl = lu0
+		}
+		if (bestUrl) log(defaultReportDir(), "登录追踪：轨迹里找到真实投稿系统网址 bestUrl=" + bestUrl)
+		if (bestUrl && !(structure && structure.plan) && onLoggedIn && attempts < 8) {
+			attempts += 1
+			log(defaultReportDir(), "登录追踪：按真实系统网址再识别一次 #" + attempts)
+			try {
+				const rec3 = await onLoggedIn(ctx, bestUrl, bestUrl)
+				if (rec3 && rec3.plan) {
+					structure = rec3
+					planAt = String(rec3.plan?.listUrl || "")
+				} else if (rec3 && rec3.error && !(structure && structure.error)) structure = rec3
+			} catch (e) {
+				log(defaultReportDir(), "登录追踪：按 bestUrl 识别异常 " + String(e).slice(0, 200))
+			}
+		}
+		if (structure && structure.plan) {
+			const lu1 = String(structure.plan.listUrl || "")
+			if (bestUrl && (!lu1 || pcIsLoginishUrl(lu1))) {
+				structure.plan.listUrl = bestUrl
+				planAt = bestUrl
+			}
+			if (bestUrl) pcWriteStructureAt(bestUrl, structure.plan)
+		}
 		const plan = structure && structure.plan ? structure : null;
 		if (!structure) structure = { error: "没有识别到可用的稿件列表" };
 		if (!structure.plan) {
@@ -1031,6 +1120,7 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 			structure,
 			planAt,
 			closedByUser: browserClosed,
+			bestUrl,
 			pages: TRACE.slice(0, 60),
 			creds: __pcCreds ?? void 0
 		};

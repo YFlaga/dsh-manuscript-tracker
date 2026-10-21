@@ -42,6 +42,8 @@ function PaperCheckerPanel(props: any): any {
   // 登录一次时顺手记录到的账号密码（存进期刊条目，cookie 过期可自动重登）
   const [loginCreds, setLoginCreds] = React.useState<any>(null)
   const [loginTrace, setLoginTrace] = React.useState<any[]>([])
+  // [patch 2026-10-22d] 登录轨迹里发现的真实投稿系统网址（用户填的常是登录门户）
+  const [loginBestUrl, setLoginBestUrl] = React.useState<string>('')
   // 已经登录过（页面直接进后台、没有密码表单）时自动记录拿不到凭据：允许手动补录，跟条目一起保存
   const [manualUser, setManualUser] = React.useState<string>('')
   const [manualPass, setManualPass] = React.useState<string>('')
@@ -144,6 +146,7 @@ function PaperCheckerPanel(props: any): any {
         // [patch 2026-10-22] 识别失败时把「浏览器里实际看到的页面」列出来：用户才知道自己粘的是统一身份门户还是投稿系统
         const pgs: any[] = Array.isArray(res.pages) ? res.pages : []
         setLoginTrace(pgs)
+        setLoginBestUrl(String((res as any).bestUrl ?? ''))
         const pageLine = pgs.length ? '；你访问过的页面见下方轨迹（共 ' + pgs.length + ' 条，可点选）' : ''
         setLoginMsg('登录结束 ✓（用时 ' + Math.round((res.waitedMs ?? 0) / 1000) + 's' + (res.closedByUser ? '，你关闭了窗口' : '') + '）' + errLine + credLine + pageLine)
       } else {
@@ -163,18 +166,22 @@ function PaperCheckerPanel(props: any): any {
     try { journals = JSON.parse(journalsText) } catch { journals = [] }
     if (!Array.isArray(journals)) journals = []
     const norm = (x: string) => x.replace(/\/+$/, '').toLowerCase()
-    if (journals.some((j2: any) => norm(String(j2?.baseUrl ?? '')) === norm(url))) {
-      setLoginMsg('该网址已在期刊列表里，未重复加入')
+    const plan = loginPlan || {}
+    // [patch 2026-10-22d] 用户填的往往是登录/统一身份门户；优先用登录轨迹里发现的真实投稿系统网址
+    const planListUrl = String(plan?.listUrl ?? '')
+    const saneListUrl = planListUrl && !/orcid\.org|accounts\.taylorfrancis\.com|\/identity|\/login|\/oauth|login\.microsoftonline/i.test(planListUrl) ? planListUrl : ''
+    const finalUrl = (saneListUrl || loginBestUrl || url).replace(/\/+$/, '')
+    if (journals.some((j2: any) => norm(String(j2?.baseUrl ?? '')) === norm(finalUrl))) {
+      setLoginMsg('该网址已在期刊列表里，未重复加入（' + finalUrl + '）')
       return
     }
-    const plan = loginPlan || {}
-    const name = loginName.trim() || url.replace(/^https?:\/\//, '').replace(/\/.*$/, '')
+    const name = loginName.trim() || finalUrl.replace(/^https?:\/\//, '').replace(/\/.*$/, '')
     // 自动记录到的凭据优先；已登录站点没有密码表单时用上面手动补录的
     const uName = String(loginCreds?.username ?? '') || manualUser.trim()
     const uPass = String(loginCreds?.password ?? '') || manualPass
     journals.push({
       name,
-      baseUrl: url,
+      baseUrl: finalUrl,
       username: uName,
       password: uPass,
       sections: Array.isArray(plan.menuSections) ? plan.menuSections : [],
@@ -184,7 +191,7 @@ function PaperCheckerPanel(props: any): any {
     setLoginPlan(null)
     setManualUser('')
     setManualPass('')
-    setLoginMsg('已加入期刊列表' + (uPass ? '（已记录账号密码 ✓）' : '（未记录账号密码，只靠持久化 cookie）') + '，正在保存…')
+    setLoginMsg('已加入期刊列表' + (uPass ? '（已记录账号密码 ✓）' : '（未记录账号密码，只靠持久化 cookie）') + (finalUrl !== url ? '（采用真实投稿系统网址：' + finalUrl + '）' : '') + '，正在保存…')
     // [patch 2026-10-22] 加入后立刻落盘，不再要求用户再点一次「保存」
     void saveJournalsNow(journals, '已加入「' + name + '」')
   }
