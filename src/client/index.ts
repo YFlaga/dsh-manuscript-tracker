@@ -279,6 +279,8 @@ function PaperCheckerPanel(props: any): any {
     textarea: { width: '100%', boxSizing: 'border-box', padding: '8px', borderRadius: 8, border: '1px solid var(--dsw-alias-border-l1, #ccc)', background: 'transparent', color: 'inherit', fontFamily: 'monospace', fontSize: 12, minHeight: 180 },
     btn: { padding: '6px 14px', borderRadius: 8, border: '1px solid var(--dsw-alias-border-l1, #ccc)', background: 'transparent', color: 'inherit', cursor: 'pointer' },
     title: { fontSize: 14, fontWeight: 600, marginBottom: 12 },
+    // [patch 2026-10-22r] 模块小标题
+    sectionTitle: { fontSize: 13, fontWeight: 600, marginTop: 6, marginBottom: 8 },
     hint: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary, #999)', marginTop: 4, lineHeight: 1.5 },
     report: { width: '100%', boxSizing: 'border-box', padding: 10, borderRadius: 8, border: '1px solid var(--dsw-alias-border-l1, #ccc)', background: 'transparent', color: 'inherit', fontFamily: 'monospace', fontSize: 12, whiteSpace: 'pre-wrap', maxHeight: 320, overflow: 'auto', marginTop: 12 },
   } as const
@@ -329,8 +331,9 @@ function PaperCheckerPanel(props: any): any {
       ),
       React.createElement('div', { style: s.hint }, '只列出当前已打开的会话；若目标会话未打开，定时汇报会跳过对话（微信照常推送）。'),
     ),
+    React.createElement('div', { style: s.sectionTitle }, '新期刊识别'),
     React.createElement('div', { style: { ...s.row, border: '1px dashed var(--dsw-alias-border-l1, #ccc)', borderRadius: 8, padding: 10 } },
-      React.createElement('label', { style: s.label }, '➕ 新增期刊'),
+      React.createElement('label', { style: s.label }, '应用模型'),
       React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 6 } },
         React.createElement('select', {
           style: { ...s.input, flex: 1 },
@@ -358,13 +361,13 @@ function PaperCheckerPanel(props: any): any {
       }),
       React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center', flexWrap: 'wrap' } },
         React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', onClick: loginOnce, disabled: loginBusy },
-          loginBusy ? '登录中…（关闭浏览器后结束）' : '🔐 登录一次并识别'),
+          loginBusy ? '登录中…（关闭浏览器后结束）' : '登录一次并识别'),
         React.createElement('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary, #999)' } },
           '在打开的浏览器里人工登录一次。登录后继续点开“我的稿件/Author Dashboard”等页面，最后关闭浏览器窗口。插件会记录你访问过的每一个页面，在下方点击真实网址（一般是最后打开的那个）前方的“填入”，并检查账号、密码，确认无误后点击“加入期刊列表”。'), // [patch 2026-10-22q]
       ),
       loginMsg ? React.createElement('div', { style: { fontSize: 11, marginBottom: 4, color: loginOk ? 'var(--dsw-alias-label-secondary, #888)' : 'var(--dsw-alias-label-tertiary, #999)' } }, loginMsg) : null,
       loginPlan ? React.createElement('div', { style: { fontSize: 12, marginBottom: 6, color: 'var(--dsw-alias-label-secondary, #666)', wordBreak: 'break-all' } },
-        '已识别系统：' + String(loginPlan.system || 'other') + '（置信度 ' + (Number(loginPlan.confidence ?? 0) || 0).toFixed(2) + '）/ 抓取入口：' + (loginPlan.listUrl || '(未识别到列表页，可再登录一次)'),
+        '已识别系统：' + String(loginPlan.system || 'other') + '（置信度 ' + (Number(loginPlan.confidence ?? 0) || 0).toFixed(2) + '）',
       ) : null,
       loginTrace.length ? React.createElement('div', { style: { marginBottom: 6, maxHeight: 240, overflow: 'auto', border: '1px solid var(--dsw-alias-border-l1, #ccc)', borderRadius: 6, padding: 6, fontSize: 11, lineHeight: 1.5 } },
         React.createElement('div', { style: { ...s.hint, marginBottom: 4 } }, '你在登录窗口里访问过的页面（按时间顺序）。点「填入」把它设为期刊入口网址；网址文字也可以直接拖选复制：'),
@@ -429,9 +432,10 @@ function PaperCheckerPanel(props: any): any {
       null,
 
     ),
+    // [patch 2026-10-22r] 期刊管理：标题在模块外，保存/检查/结果/JSON 都在模块内
+    React.createElement('div', { style: s.sectionTitle }, '期刊管理'),
     React.createElement('div', { style: { ...s.row, border: '1px solid var(--dsw-alias-border-l1, #ccc)', borderRadius: 8, padding: 10 } },
-      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-        React.createElement('label', { style: { ...s.label, marginBottom: 0, flex: 1 } }, '已添加期刊（' + journalItems.length + ' 条）'),
+      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end' } },
         confirmClear
           ? React.createElement('span', { style: { display: 'flex', gap: 4 } },
               React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', onClick: clearJournals }, '确认清空'),
@@ -442,7 +446,7 @@ function PaperCheckerPanel(props: any): any {
       journalsInvalid
         ? React.createElement('div', { style: s.hint }, '下方 JSON 当前不是合法数组，无法列出条目。')
         : (journalItems.length === 0
-          ? React.createElement('div', { style: s.hint }, '（暂无期刊。用上面的「新增期刊」先登录一次再加入，或直接编辑下方 JSON。）')
+          ? React.createElement('div', { style: s.hint }, '（暂无期刊。用上面的「新期刊识别」登录一次再加入，或直接编辑下方 JSON。）')
           : React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
               ...journalItems.map((j2: any, i: number) =>
                 React.createElement('div', {
@@ -472,27 +476,23 @@ function PaperCheckerPanel(props: any): any {
                 ),
               ),
             )),
-      React.createElement('div', { style: s.hint }, '删除只改这份编辑内容，点下方「保存」后才写入配置。'),
-    ),
-    React.createElement('div', { style: s.row },
-      React.createElement('label', { style: s.label }, '期刊列表（JSON 数组）'),
-      React.createElement('textarea', {
-        style: s.textarea,
-        value: journalsText,
-        onChange: (e: any) => setJournalsText(e.target.value),
-        spellCheck: false,
-      }),
-      React.createElement('div', { style: s.hint },
-        // [patch 2026-10-22q] 用户要求删除这段字段说明
-    '',
+      React.createElement('div', { style: s.hint }, '删除、清空、上移、下移会立刻保存到配置；下面的「期刊列表」是原始 JSON，改完请点「保存」。'),
+      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 } },
+        React.createElement('button', { style: s.btn, onClick: save, disabled: saving }, saving ? '保存中…' : '保存'),
+        React.createElement('button', { style: s.btn, onClick: runNow, disabled: running }, running ? '检查中…' : '立即检查'),
+        msg ? React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-tertiary, #999)' } }, msg) : null,
+      ),
+      report ? React.createElement('pre', { style: { ...s.report, marginTop: 0, marginBottom: 8 } }, report) : null,
+      React.createElement('div', { style: { marginBottom: 0 } },
+        React.createElement('label', { style: s.label }, '期刊列表（JSON 数组）'),
+        React.createElement('textarea', {
+          style: s.textarea,
+          value: journalsText,
+          onChange: (e: any) => setJournalsText(e.target.value),
+          spellCheck: false,
+        }),
       ),
     ),
-    React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 12 } },
-      React.createElement('button', { style: s.btn, onClick: save, disabled: saving }, saving ? '保存中…' : '保存'),
-      React.createElement('button', { style: s.btn, onClick: runNow, disabled: running }, running ? '检查中…' : '立即检查'),
-      msg ? React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-tertiary, #999)' } }, msg) : null,
-    ),
-    report ? React.createElement('pre', { style: s.report }, report) : null,
   )
 }
 
