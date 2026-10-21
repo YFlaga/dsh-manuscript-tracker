@@ -331,6 +331,18 @@ function PaperCheckerPanel(props: any): any {
       ),
       React.createElement('div', { style: s.hint }, '只列出当前已打开的会话；若目标会话未打开，定时汇报会跳过对话（微信照常推送）。'),
     ),
+    // [patch 2026-10-22t] 已结束投稿追溯范围（定时任务设置的最后一项）
+    React.createElement('div', { style: s.row },
+      React.createElement('label', { style: s.label }, '已结束投稿追溯范围'),
+      React.createElement('select', {
+        style: s.input,
+        value: String(cfg.endedMonths ?? 1),
+        onChange: (e: any) => setCfg({ ...cfg, endedMonths: Number(e.target.value) || 1 }),
+      },
+        ...[1, 3, 6, 12].map((m: number) => React.createElement('option', { key: String(m), value: String(m) }, '最近 ' + m + ' 个月')),
+      ),
+      React.createElement('div', { style: s.hint }, '已出版、已发表、已拒稿等已结束的投稿，只列出这段范围内的（最短 1 个月）；进行中的投稿不受影响。'),
+    ),
     React.createElement('div', { style: s.sectionTitle }, '新期刊识别'),
     React.createElement('div', { style: { ...s.row, border: '1px dashed var(--dsw-alias-border-l1, #ccc)', borderRadius: 8, padding: 10 } },
       React.createElement('label', { style: s.label }, '应用模型'),

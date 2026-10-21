@@ -52,6 +52,8 @@ export interface Config {
   discoverProvider: string
   discoverModel: string
   browserPath: string
+  // [patch 2026-10-22t] 已结束（出版/发表/拒稿…）投稿的追溯范围，单位：月，最小 1
+  endedMonths: number
 }
 
 export const Config = z.object({
@@ -84,6 +86,8 @@ export const Config = z.object({
   discoverModel: z.string().default(''),
   // Playwright 浏览器目录（可选的 PLAYWRIGHT_BROWSERS_PATH；留空用系统默认 %LOCALAPPDATA%\ms-playwright）
   browserPath: z.string().default(''),
+  // [patch 2026-10-22t] 已结束（出版/发表/拒稿…）投稿的追溯范围，单位：月，最小 1
+  endedMonths: z.number().default(1),
 })
 
 // DSH 0.2 的设置服务只看 schema 的 meta.volatile 才允许写入配置（dsh-settings 的
@@ -1909,8 +1913,21 @@ function stageOf(secName: string, status: string): Stage {
   return 'submission'
 }
 
-/** 决策后多少天内仍列入报告（超出视为历史，不再刷屏）。 */
-const DECISION_WINDOW_DAYS = 7
+/** [patch 2026-10-22t] 已结束投稿的默认追溯范围（月）。 */
+const DEFAULT_ENDED_MONTHS = 1
+/** [patch 2026-10-22t] 「已结束」状态：接受/拒稿/发表/撤稿/转投等。 */
+function pcIsEndedStatus(status: string | undefined): boolean {
+  const t = String(status || '').toLowerCase()
+  return /accept|reject|publish|withdraw|declin|transfer|complet|发表|出版|已拒|拒稿|接受|录用|撤回/.test(t)
+}
+/** [patch 2026-10-22t] 日期是否在最近 months 个月内（最小 1 个月）。 */
+function pcWithinMonths(today: Date, dateStr: string | undefined, months: number): boolean {
+  const d = parseEmDate(dateStr)
+  if (!d) return false
+  const cut = new Date(today.getTime())
+  cut.setMonth(cut.getMonth() - Math.max(1, Number(months) || DEFAULT_ENDED_MONTHS))
+  return d.getTime() >= cut.getTime()
+}
 const MONTHS: Record<string, number> = {
   jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
   jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
@@ -1937,17 +1954,14 @@ function parseEmDate(s: string | undefined): Date | null {
   return isNaN(d.getTime()) ? null : d
 }
 
-/** 决策历史分区：只保留决策日期在最近 DECISION_WINDOW_DAYS 天内的稿件（日期无法解析则视为历史，不列）。 */
-function recentDecisions(subs: Submission[], today: Date): Submission[] {
-  return subs.filter((s) => {
-    const d = parseEmDate(s.statusDate)
-    if (!d) return false
-    const diff = Math.round((today.getTime() - d.getTime()) / 86400000)
-    return diff >= 0 && diff <= DECISION_WINDOW_DAYS
-  })
+/** [patch 2026-10-22t] 已结束分区：只保留决策日期在最近 months 个月内的稿件（日期无法解析则视为历史，不列）。 */
+function recentDecisions(subs: Submission[], today: Date, months: number): Submission[] {
+  return subs.filter((s) => pcWithinMonths(today, s.statusDate, months))
 }
 
-function formatReport(results: JournalResult[], dateStr: string): string {
+function formatReport(results: JournalResult[], dateStr: string, endedMonths: number = DEFAULT_ENDED_MONTHS): string {
+  // [patch 2026-10-22t] 已结束投稿的追溯月数（配置 endedMonths，最小 1）
+  const endMonths = Math.max(1, Number(endedMonths) || DEFAULT_ENDED_MONTHS)
   const lines: string[] = [`📊 每日投稿状态报告 (${dateStr})`, '']
   let total = 0
   let decisionTotal = 0
@@ -1977,11 +1991,11 @@ function formatReport(results: JournalResult[], dateStr: string): string {
       const subs = sec.submissions ?? []
       // 决策历史分区：只列最近 7 天内的决策，独立分组，不计入活跃投稿。
       if (sec.kind === 'decision') {
-        const recent = recentDecisions(subs, today)
+        const recent = recentDecisions(subs, today, endMonths)
         if (recent.length === 0) continue
         hasContent = true
         decisionTotal += recent.length
-        secLines.push(`- 📂 近期决策（${DECISION_WINDOW_DAYS} 天内）`)
+        secLines.push(`- 📂 已结束（最近 ${endMonths} 个月）`)
         for (const s of recent) {
           const parts: string[] = []
           if (s.statusDate) parts.push(`决策 ${s.statusDate}`)
@@ -1996,6 +2010,8 @@ function formatReport(results: JournalResult[], dateStr: string): string {
       hasContent = true
       secLines.push(`- 📂 ${sec.name}（${sec.count}）`)
       for (const s of subs) {
+        // [patch 2026-10-22t] 已结束且超出追溯窗口的稿件不再列出
+        if (pcIsEndedStatus(s.status) && !pcWithinMonths(today, s.statusDate, endMonths)) continue
         const stage = stageOf(sec.name, s.status)
         stageCounts[stage]++
         total++
@@ -2623,7 +2639,7 @@ export function apply(ctx: AppContext, config: Config): void {
           const cfgRun = getConfig()
           const results = await runCheck(cfgRun, pcScrapeEnv(cfgRun))
           const dateStr = new Date().toISOString().slice(0, 10)
-          const reportRun = formatReport(results, dateStr)
+          const reportRun = formatReport(results, dateStr, cfgRun.endedMonths)
           // 立即检查同样汇报到对话（原先只有定时检查会汇报）。
           let deliver = ''
           if (cfgRun.reportSessionId) {
@@ -2638,7 +2654,7 @@ export function apply(ctx: AppContext, config: Config): void {
           try { report = readFileSync(join(dir, 'latest.md'), 'utf8') } catch { /* 无最近报告 */ }
           if (!report) {
             const results = await runCheck(cfg, pcScrapeEnv(cfg))
-            report = formatReport(results, new Date().toISOString().slice(0, 10))
+            report = formatReport(results, new Date().toISOString().slice(0, 10), cfg.endedMonths)
           }
           const r = await reportToSession(__pcAgentsRef || ctx.agents, __pcSessionsRef || ctx.sessions, cfg.reportSessionId, report)
           return send(200, { ok: true, result: r })
@@ -2660,7 +2676,7 @@ export function apply(ctx: AppContext, config: Config): void {
           }
           const dateOne = new Date().toISOString().slice(0, 10)
           const rOne: any = await scrapeJournal(jOne, cfgOne.browserPath, pcScrapeEnv(cfgOne))
-          const reportOne = formatReport([rOne], dateOne)
+          const reportOne = formatReport([rOne], dateOne, cfgOne.endedMonths)
           let deliverOne = ''
           if (cfgOne.reportSessionId) {
             try { deliverOne = await reportToSession(__pcAgentsRef || ctx.agents, __pcSessionsRef || ctx.sessions, cfgOne.reportSessionId, reportOne) } catch (e) { deliverOne = '汇报异常: ' + String(e) }
@@ -2770,7 +2786,7 @@ export function apply(ctx: AppContext, config: Config): void {
       if (journals.length === 0) return '没有匹配的期刊配置'
       const results = await runCheck({ ...cfg, journals }, pcScrapeEnv(cfg))
       const dateStr = new Date().toISOString().slice(0, 10)
-      const report = formatReport(results, dateStr)
+      const report = formatReport(results, dateStr, cfg.endedMonths)
       return report
     },
     presentCall: (args: any) => ({ card: 'generic', title: '检查投稿状态', kind: 'read', rawInput: args.journal_name ?? '' }),
@@ -2790,7 +2806,7 @@ export function apply(ctx: AppContext, config: Config): void {
         const dir = cfg.reportDir || defaultReportDir()
         log(dir, '定时检查开始 date=' + date + ' time=' + time)
         const results = await runCheck(cfg, pcScrapeEnv(cfg))
-        const report = formatReport(results, date)
+        const report = formatReport(results, date, cfg.endedMonths)
         writeFileSync(join(dir, `report-${date}.md`), report, 'utf8')
         writeFileSync(join(dir, 'latest.md'), report, 'utf8')
         if (cfg.serverchanKey) {
