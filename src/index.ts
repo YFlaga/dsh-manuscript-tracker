@@ -893,6 +893,7 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 		let okUrl = "";
 		let loggedIn = false;
 		let browserClosed = false;
+		let emptyTicks = 0;
 		try {
 			ctx.on?.("close", () => {
 				browserClosed = true;
@@ -938,9 +939,15 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 				break;
 			}
 			if (!pagesList.length) {
-				browserClosed = true;
-				break;
+				emptyTicks += 1;
+				log(defaultReportDir(), "登录追踪：当前没有可见标签页（第 " + emptyTicks + " 次），窗口还开着就继续等");
+				if (emptyTicks >= 8) {
+					browserClosed = true;
+					break;
+				}
+				continue;
 			}
+			emptyTicks = 0;
 			// 1) 顺手记下账号密码（登录表单还在页面上时取 value；提交后页面跳走就没了）
 			if (!__pcCreds) {
 				for (const pg of pagesList) {
@@ -997,6 +1004,7 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 				if (cur && cur !== lastTryKey) await tryRecognize(loggedIn ? "页面变了" : "页面变了（还没检测到登录信号）");
 			}
 		}
+		log(defaultReportDir(), "登录追踪结束：窗口" + (browserClosed ? "已关闭" : "到达 30 分钟上限") + "，用时 " + Math.round((Date.now() - startedAt) / 1000) + "s，访问页面 " + TRACE.length + " 条，loggedIn=" + loggedIn + " plan=" + !!(structure && structure.plan));
 		// 收尾：补一次标题较全的轨迹快照
 		try {
 			for (const pg of ctx.pages?.() ?? []) {
