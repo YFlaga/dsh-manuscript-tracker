@@ -933,6 +933,47 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 			error: "有头浏览器启动失败（没有可用的完整 Chromium）: " + launchErr.join(" | ").slice(0, 500)
 		};
 		const page = (ctx.pages?.() ?? [])[0] ?? await ctx.newPage();
+		// [patch 2026-10-22k] 页面内记录器：用户每次输入/点击/回车都把账号密码记到 window.__pcCapturedCreds
+		try {
+			await ctx.addInitScript(() => {
+				try {
+					const win: any = window as any;
+					const doc: any = document as any;
+					const grab = () => {
+						try {
+							const pws: any[] = Array.from(doc.querySelectorAll("input[type=password]")) as any[];
+							const pw: any = pws.find((i: any) => String(i.value || "").length > 0);
+							if (!pw) return;
+							const form: any = pw.form || (pw.closest ? pw.closest("form") : null) || doc;
+							const cands: any[] = Array.from(form.querySelectorAll("input")).filter((i: any) => {
+								const ty = String(i.type || "").toLowerCase();
+								if (ty !== "text" && ty !== "email" && ty !== "") return false;
+								return i !== pw && String(i.value || "").length > 0;
+							});
+							const u: any = cands.find((i: any) => /user|email|login|account|name|id/i.test(String(i.name || "") + String(i.id || "") + String(i.placeholder || ""))) || cands[0];
+							win.__pcCapturedCreds = { username: u ? String(u.value || "") : "", password: String(pw.value || "") };
+							try { console.log("__pcCred__ " + JSON.stringify(win.__pcCapturedCreds)); } catch (e2) {}
+						} catch (e) {}
+					};
+					for (const ev of ["input", "change", "blur", "submit", "click", "keydown"]) doc.addEventListener(ev, grab, true);
+					setInterval(grab, 500);
+				} catch (e) {}
+			});
+		} catch (e) { log(defaultReportDir(), "登录追踪：安装凭据记录器失败 " + String(e).slice(0, 160)); }
+		// [patch 2026-10-22k2] console 标记事件即时回传凭据（页面跳走也不丢）
+		let __pcCreds: { username: string; password: string } | null = null;
+		const __pcOnConsole = (m: any) => {
+			try {
+				const t = String(m?.text?.() ?? "");
+				if (!t.startsWith("__pcCred__ ")) return;
+				const j = JSON.parse(t.slice(11));
+				if (j && j.password) __pcCreds = { username: String(j.username || ""), password: String(j.password) } // [patch 2026-10-22k3]
+			} catch {}
+		};
+		try {
+			for (const pg of ctx.pages?.() ?? []) pg.on?.("console", __pcOnConsole);
+			ctx.on?.("page", (pg: any) => pg.on?.("console", __pcOnConsole));
+		} catch {}
 		let startHost = "";
 		try {
 			startHost = new URL(baseUrl).hostname.toLowerCase();
@@ -963,7 +1004,6 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 				browserClosed = true;
 			});
 		} catch {}
-		let __pcCreds: { username: string; password: string } | null = null;
 		// [patch 2026-10-22i] 登录成功后冻结凭据（只记最后一次成功登录时用的）
 		let __pcCredsLocked = false;
 		let structure: any = null;
@@ -1017,11 +1057,15 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 			emptyTicks = 0;
 			// 1) 顺手记下账号密码（登录表单还在页面上时取 value；提交后页面跳走就没了）
 			// [patch 2026-10-22i] 一直刷新，直到登录成功才冻结（用户可能第一次输错再重输）
-			if (!loggedIn && !__pcCredsLocked) {
+			// [patch 2026-10-22k3] 始终刷新：最后一次输入就是用户真正提交的那一份
+			if (true) {
 				for (const pg of pagesList) {
 					for (const fr of pg.frames?.() ?? []) {
 						try {
 							const got = await fr.evaluate(() => {
+								// [patch 2026-10-22k] 优先读页面内记录器抓到的「最后一次输入」
+								const rec: any = (window as any).__pcCapturedCreds;
+								if (rec && rec.password) return { username: String(rec.username || ""), password: String(rec.password) };
 								const pws: any[] = Array.from(document.querySelectorAll("input[type=password]")) as any[];
 								const pw: any = pws.find((i: any) => String(i.value || "").length > 0);
 								if (!pw) return null;
@@ -1065,7 +1109,6 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 					} catch {}
 				}
 				if (loggedIn) log(defaultReportDir(), "登录追踪：检测到登录成功 url=" + okUrl);
-				if (loggedIn) __pcCredsLocked = true;
 			}
 			// 4) 页面集合变了就试一次识别（不要求已登录：有些门户检测不到登录信号，用户点进稿件列表本身就是证据）
 			if (!(structure && structure.plan) && Date.now() - lastTryAt > 1e4) {
