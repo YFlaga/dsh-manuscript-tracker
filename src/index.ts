@@ -38,7 +38,7 @@ export interface JournalConfig {
   username: string
   password: string
   sections: string[]
-  system?: 'editorial-manager' | 'other'
+  system?: string
 }
 
 export interface Config {
@@ -61,7 +61,7 @@ export const Config = z.object({
     username: z.string(),
     password: z.string(),
     sections: z.array(z.string()).default([]),
-    system: z.union([z.const('editorial-manager'), z.const('other')]).default('editorial-manager'),
+    system: z.string().default('editorial-manager'),
     // [自动识别] LLM 识别出的整份主菜单组织结构：分区顺序、是否抓取、kind 与分组。
     // 缺省时（模型失败或旧配置）检查流程走原来的确定性逻辑。
     structure: z.object({
@@ -1632,9 +1632,11 @@ async function scrapeJournal(j: JournalConfig, browserPath?: string, env?: Scrap
   const st = pcReadStructure(j.baseUrl)
   const plan = st.plan
   const e = env ?? {}
-  if (j.system === 'other') {
+  // [patch 2026-10-22h] 非 editorial-manager 的系统（taylorfrancis / scholarone / sNAPP …）走通用抓取器
+  const sys0 = String(j.system ?? 'editorial-manager')
+  if (sys0 !== 'editorial-manager') {
     if (plan && plan.system !== 'editorial-manager') return scrapeGenericJournal(j, plan, { browserPath, ...e })
-    return { journal: j.name, system: 'other' }
+    return { journal: j.name, system: sys0 }
   }
   if (!plan || plan.system === 'editorial-manager') return scrapeEmJournal(j, browserPath)
   return scrapeGenericJournal(j, plan, { browserPath, ...e })
@@ -2591,7 +2593,7 @@ export function apply(ctx: AppContext, config: Config): void {
             username: String(one.username ?? ''),
             password: String(one.password ?? ''),
             sections: Array.isArray(one.sections) ? one.sections : [],
-            system: one.system === 'other' ? 'other' : 'editorial-manager',
+            system: String(one.system ?? 'editorial-manager') as any,
             structure: one.structure,
           }
           const dateOne = new Date().toISOString().slice(0, 10)
