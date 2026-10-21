@@ -1,5 +1,5 @@
 /**
- * @dsh-external/dsh-paper-checker
+ * @dsh-external/dsh-manuscript-tracker
  * 检查学术期刊投稿审稿状态并定时汇报。
  * - Editorial Manager 期刊：内置确定性 Playwright 抓取（Playwright 内置 Chromium，无头）
  * - 其他投稿系统（system='other'）：回退信号，交给 AI 用浏览器工具处理
@@ -28,7 +28,7 @@ type AppContext = Context & {
   llm: { stream(options: any): AsyncIterable<any> }
 }
 
-export const name = '@dsh-external/dsh-paper-checker'
+export const name = '@dsh-external/dsh-manuscript-tracker'
 export const inject = ['tools', 'timer', 'webServer', 'agents', 'sessions', 'llm']
 
 // ============ 配置 ============
@@ -389,7 +389,7 @@ function ctxAgentsGet(sessionId: any) {
 function __pcBuildMsg(report: any) {
   try {
     return createUserMessage({
-      content: [{ type: "text", text: "📊 每日投稿状态自动汇报（插件 dsh-paper-checker）：\n\n" + report + "\n\n——请一句话确认收到即可，不要重新检查、不要调用工具。" }],
+      content: [{ type: "text", text: "📊 每日投稿状态自动汇报（插件 投稿状态追踪）：\n\n" + report + "\n\n——请一句话确认收到即可，不要重新检查、不要调用工具。" }],
       source: { kind: "user" }
     });
   } catch (e: any) { return report; }
@@ -412,7 +412,7 @@ function readPersistedPC() {
         const doc = __pcYaml(text);
         const arr = Array.isArray(doc) ? doc : (doc && typeof doc === "object" ? Object.values(doc)[0] : null);
         const list = Array.isArray(arr) ? arr : [];
-        const entry = list.find((x: any) => x && x.name === "@dsh-external/dsh-paper-checker") || list.find((x: any) => x && x.config);
+        const entry = list.find((x: any) => x && x.name === "@dsh-external/dsh-manuscript-tracker") || list.find((x: any) => x && x.config);
         if (entry && entry.config) return entry.config;
       } catch (e: any) { /* 试下一个 */ }
     }
@@ -2388,7 +2388,7 @@ async function reportToSession(agents: any, sessions: any, sessionId: string, re
   const message = createUserMessage({
     content: [{
       type: 'text',
-      text: '📊 每日投稿状态自动汇报（插件 dsh-paper-checker）：\n\n' + report +
+      text: '📊 每日投稿状态自动汇报（插件 投稿状态追踪）：\n\n' + report +
         '\n\n——请一句话确认收到即可，不要重新检查、不要调用工具。',
     }],
     source: { kind: 'user' },
@@ -2847,6 +2847,6 @@ export function apply(ctx: AppContext, config: Config): void {
       }
     })().catch((e) => log(reportDir(), '定时检查异常: ' + String(e)))
   }, 30000)
-  ctx.logger?.info?.('[@dsh-external/dsh-paper-checker] 守护定时启动（每天 ' + getConfig().time + ' ' + getConfig().timezone + '）')
+  ctx.logger?.info?.('[@dsh-external/dsh-manuscript-tracker] 守护定时启动（每天 ' + getConfig().time + ' ' + getConfig().timezone + '）')
 }
 

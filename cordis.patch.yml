@@ -1,4 +1,4 @@
-# @dsh-external/dsh-paper-checker bundle patch
+# @dsh-external/dsh-manuscript-tracker bundle patch
 #
 # 这是 `dsh.bundle.patch` 指向的挂载层。当插件通过标准渠道安装
 # （官方 CLI `dsh plugin add` 或插件市场 `pnpm add` + bundles 写入）后，
@@ -10,4 +10,4 @@
 # paper-checker 命名空间。
 - insert:
     - id: paper-checker
-      name: '@dsh-external/dsh-paper-checker'
+      name: '@dsh-external/dsh-manuscript-tracker'

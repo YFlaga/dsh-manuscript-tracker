@@ -1,6 +1,6 @@
-# @dsh-external/dsh-paper-checker
+# 投稿状态追踪（@dsh-external/dsh-manuscript-tracker）
 
-检查学术期刊投稿审稿状态并定时汇报的 DSH 插件。
+追踪学术期刊投稿进度（已投 / 审稿 / 修改 / 已接受 / 已拒稿）并按计划汇报到对话或微信的 DSH 插件。
 
 - **Editorial Manager 期刊**：内置确定性 Playwright 抓取（Playwright 内置 Chromium，无头模式；浏览器目录可用 `browserPath` 配置）。
 - **自动识别稿件阶段**：主菜单上所有「活跃投稿分区」自动抓取（审稿 submission / 修改 revision / 生产 production），报告按分区分组 + 摘要统计三阶段篇数。
@@ -24,14 +24,14 @@
 
 ```bash
 cd <tgz 所在目录>
-dsh plugin --profile web add ./dsh-external-dsh-paper-checker-0.0.1.tgz
+dsh plugin --profile web add ./dsh-external-dsh-manuscript-tracker-0.0.1.tgz
 ```
 
-（相对路径会被 CLI 锚定到你的调用目录；也可用绝对路径 `dsh plugin --profile web add E:/path/to/dsh-external-dsh-paper-checker-0.0.1.tgz`。）
+（相对路径会被 CLI 锚定到你的调用目录；也可用绝对路径 `dsh plugin --profile web add E:/path/to/dsh-external-dsh-manuscript-tracker-0.0.1.tgz`。）
 
 `dsh plugin add` 会：
 1. 把 tgz 装进 profile（依赖 `playwright-core` 一并安装）；
-2. 检测到本包声明了 `dsh.bundle`，自动把 `@dsh-external/dsh-paper-checker` 写入 profile 的 `dsh.profile.bundles` 启用名单。
+2. 检测到本包声明了 `dsh.bundle`，自动把 `@dsh-external/dsh-manuscript-tracker` 写入 profile 的 `dsh.profile.bundles` 启用名单。
 
 装完**重启 DSH** 即可在「设置」里看到「投稿检查」面板，按需配置期刊后生效。
 
@@ -45,9 +45,9 @@ dsh plugin --profile web add ./dsh-external-dsh-paper-checker-0.0.1.tgz
 
 ```bash
 cd <DSH_HOME>/profiles/web
-pnpm add file:/绝对路径/dsh-external-dsh-paper-checker-0.0.1.tgz
+pnpm add file:/绝对路径/dsh-external-dsh-manuscript-tracker-0.0.1.tgz
 # 然后编辑 <DSH_HOME>/profiles/web/package.json，
-# 确保 dsh.profile.bundles 数组里含 "@dsh-external/dsh-paper-checker"，重启 DSH。
+# 确保 dsh.profile.bundles 数组里含 "@dsh-external/dsh-manuscript-tracker"，重启 DSH。
 ```
 
 ## 配置

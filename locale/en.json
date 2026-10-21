@@ -1,3 +1,6 @@
 {
-  "meta": {}
+  "meta": {
+    "title": "Manuscript Status Tracker (dsh-manuscript-tracker)",
+    "description": "Track journal manuscript submission status and report on a schedule; finished submissions can be included within a look-back window."
+  }
 }

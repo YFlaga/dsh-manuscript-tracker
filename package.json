@@ -1,7 +1,7 @@
 {
-  "name": "@dsh-external/dsh-paper-checker",
+  "name": "@dsh-external/dsh-manuscript-tracker",
   "version": "0.0.1",
-  "description": "检查学术期刊投稿审稿状态并定时汇报：Editorial Manager 期刊走确定性 Playwright 抓取，其他投稿系统回退给 AI 用浏览器工具处理。",
+  "description": "投稿状态追踪：追踪学术期刊投稿进度（已投/审稿/修改/已接受/已拒稿）并按计划汇报，已结束投稿可按时间范围追溯；Editorial Manager 期刊确定性抓取，其他投稿系统结构化识别后通用抓取",
   "type": "module",
   "main": "./lib/index.js",
   "files": [

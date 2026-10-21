@@ -1,5 +1,5 @@
 /**
- * @dsh-external/dsh-paper-checker — client 配置面板（plugins.bundle.config）。
+ * @dsh-external/dsh-manuscript-tracker — client 配置面板（plugins.bundle.config）。
  * 注册在侧栏「插件」页里本 bundle 的详情页上（描述与行列表之间），可视化编辑定时配置 + 期刊列表。
  * 配置读写走插件自建 HTTP API（/paper-checker/api），绕过 apiproxy 的 settings 白名单。
  */
@@ -515,6 +515,6 @@ export function apply(ctx: ClientContext): void {
   // 页面自己画标题/图标/面包屑；注册随 bundle 的开关存在，bundle 关掉时自然消失。
   ctx.effect(() => ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
     name: 'plugins.bundle.config',
-    key: '@dsh-external/dsh-paper-checker',
+    key: '@dsh-external/dsh-manuscript-tracker',
   }, (props: any) => (props?.view === 'summary' ? null : React.createElement(PaperCheckerPanel, props)))), 'paper-checker: bundle config')
 }
