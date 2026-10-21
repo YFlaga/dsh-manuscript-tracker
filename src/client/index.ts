@@ -49,6 +49,8 @@ function PaperCheckerPanel(props: any): any {
   // 已经登录过（页面直接进后台、没有密码表单）时自动记录拿不到凭据：允许手动补录，跟条目一起保存
   const [manualUser, setManualUser] = React.useState<string>('')
   const [manualPass, setManualPass] = React.useState<string>('')
+  // [patch 2026-10-22m] 密码核对默认明文显示（能看见才能核对），可一键隐藏
+  const [showPass, setShowPass] = React.useState<boolean>(true)
   // 识别模型选择（结构识别用哪个 LLM；默认跟随 DSH 当前默认模型）
   const [modelGroups, setModelGroups] = React.useState<any[]>([])
 
@@ -395,11 +397,21 @@ function PaperCheckerPanel(props: any): any {
         }),
         React.createElement('input', {
           style: s.input,
-          placeholder: '密码（只存在本机插件配置里）',
-          type: 'password',
+          placeholder: '密码（明文显示，方便核对；只存在本机插件配置里）',
+          type: showPass ? 'text' : 'password',
           value: manualPass,
           onChange: (e: any) => setManualPass(e.target.value),
         }),
+        // [patch 2026-10-22m] 明文核对：默认可见，可切回隐藏
+        React.createElement('div', { style: { fontSize: 11, marginTop: 2 } },
+          React.createElement('a', {
+            href: '#',
+            style: { color: 'var(--dsw-alias-brand, #3b82f6)' },
+            onClick: (e: any) => { e.preventDefault(); setShowPass((v: boolean) => !v) },
+          }, showPass ? '隐藏密码' : '显示密码'),
+          React.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary, #888)', marginLeft: 6 } },
+            '（这一步明文是为了让你核对账号密码，确认无误再点「加入期刊列表（立刻保存）」）'),
+        ),
       ) : null,
       loginOk && !loginPlan ? React.createElement('div', { style: { fontSize: 11, marginBottom: 4, color: 'var(--dsw-alias-label-tertiary, #999)' } }, '结构识别没成功，但仍可先加入列表（抓取时会再试一次识别；也可以回去重新选识别模型后再登录一次）。') : null,
       loginOk ? React.createElement('div', { style: { marginTop: 4, padding: 8, borderRadius: 6, border: '1px solid var(--dsw-alias-border-l1, #ccc)', fontSize: 12 } },
