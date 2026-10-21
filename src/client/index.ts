@@ -313,9 +313,9 @@ function PaperCheckerPanel(props: any): any {
       ),
     ),
     field('Server酱 SendKey（微信推送，可留空）', 'serverchanKey', 'SCT...'),
-    field('Playwright 浏览器目录（可留空，留空用系统默认 %LOCALAPPDATA%\\ms-playwright）', 'browserPath', 'E:\\...\\pw-browsers'),
+    field('Playwright 浏览器目录（可留空）', 'browserPath', 'E:\\...\\pw-browsers'),
     React.createElement('div', { style: s.row },
-      React.createElement('label', { style: s.label }, '汇报目标会话（定时检查完成后在对话内汇报）'),
+      React.createElement('label', { style: s.label }, '汇报目标会话'),
       React.createElement('div', { style: { display: 'flex', gap: 8 } },
         React.createElement('select', {
           style: { ...s.input, flex: 1 },
@@ -330,7 +330,7 @@ function PaperCheckerPanel(props: any): any {
       React.createElement('div', { style: s.hint }, '只列出当前已打开的会话；若目标会话未打开，定时汇报会跳过对话（微信照常推送）。'),
     ),
     React.createElement('div', { style: { ...s.row, border: '1px dashed var(--dsw-alias-border-l1, #ccc)', borderRadius: 8, padding: 10 } },
-      React.createElement('label', { style: s.label }, '➕ 新增期刊（登录一次 + 自动识别结构）'),
+      React.createElement('label', { style: s.label }, '➕ 新增期刊'),
       React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 6 } },
         React.createElement('select', {
           style: { ...s.input, flex: 1 },
@@ -360,7 +360,7 @@ function PaperCheckerPanel(props: any): any {
         React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', onClick: loginOnce, disabled: loginBusy },
           loginBusy ? '登录中…（关闭浏览器后结束）' : '🔐 登录一次并识别'),
         React.createElement('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary, #999)' } },
-          '在打开的浏览器里人工登录一次（cookie 会保存）。登录后**继续点开「我的稿件 / Author Dashboard」等页面**，最后关闭浏览器窗口 —— 插件会记录你访问过的每一个页面，并自动识别投稿系统结构。'),
+          '在打开的浏览器里人工登录一次。登录后继续点开“我的稿件/Author Dashboard”等页面，最后关闭浏览器窗口。插件会记录你访问过的每一个页面，在下方点击真实网址（一般是最后打开的那个）前方的“填入”，并检查账号、密码，确认无误后点击“加入期刊列表”。'), // [patch 2026-10-22q]
       ),
       loginMsg ? React.createElement('div', { style: { fontSize: 11, marginBottom: 4, color: loginOk ? 'var(--dsw-alias-label-secondary, #888)' : 'var(--dsw-alias-label-tertiary, #999)' } }, loginMsg) : null,
       loginPlan ? React.createElement('div', { style: { fontSize: 12, marginBottom: 6, color: 'var(--dsw-alias-label-secondary, #666)', wordBreak: 'break-all' } },
@@ -425,7 +425,8 @@ function PaperCheckerPanel(props: any): any {
           React.createElement('button', { style: s.btn, type: 'button', onClick: addFromLogin }, '加入期刊列表（立刻保存）'),
         ),
       ) : null,
-      React.createElement('div', { style: s.hint }, '上面的 Provider/模型 只用于「识别投稿系统结构」这一步（不影响 DSH 主对话模型；留空则用当前默认模型）。登录成功后自动探测该系统的列表页/字段并写入本地结构缓存（~/.dsh/paper-checker/structures/）；同时把你在登录表单里输入的账号密码一并记录到期刊条目里（ORCID/SSO 登录没有表单则只靠持久化登录态）。加入列表并「保存」后，定时检查与「立即检查」都复用这份登录态。'),
+      // [patch 2026-10-22q] 用户要求删除这一段说明
+      null,
 
     ),
     React.createElement('div', { style: { ...s.row, border: '1px solid var(--dsw-alias-border-l1, #ccc)', borderRadius: 8, padding: 10 } },
@@ -482,7 +483,8 @@ function PaperCheckerPanel(props: any): any {
         spellCheck: false,
       }),
       React.createElement('div', { style: s.hint },
-        '每项字段：name 期刊名、baseUrl 站点根地址、sections 要检查的分区名数组、system 为 editorial-manager（确定性）或 other（登录一次识别出的通用结构抓取）。username/password 由「登录一次」自动记录（可留空，靠持久化 cookie）。',
+        // [patch 2026-10-22q] 用户要求删除这段字段说明
+    '',
       ),
     ),
     React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 12 } },
