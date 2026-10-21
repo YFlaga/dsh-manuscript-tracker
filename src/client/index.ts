@@ -435,14 +435,6 @@ function PaperCheckerPanel(props: any): any {
     // [patch 2026-10-22r] 期刊管理：标题在模块外，保存/检查/结果/JSON 都在模块内
     React.createElement('div', { style: s.sectionTitle }, '期刊管理'),
     React.createElement('div', { style: { ...s.row, border: '1px solid var(--dsw-alias-border-l1, #ccc)', borderRadius: 8, padding: 10 } },
-      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end' } },
-        confirmClear
-          ? React.createElement('span', { style: { display: 'flex', gap: 4 } },
-              React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', onClick: clearJournals }, '确认清空'),
-              React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', onClick: () => setConfirmClear(false) }, '取消'),
-            )
-          : React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', disabled: journalItems.length === 0, onClick: () => setConfirmClear(true) }, '清空全部'),
-      ),
       journalsInvalid
         ? React.createElement('div', { style: s.hint }, '下方 JSON 当前不是合法数组，无法列出条目。')
         : (journalItems.length === 0
@@ -477,10 +469,19 @@ function PaperCheckerPanel(props: any): any {
               ),
             )),
       React.createElement('div', { style: s.hint }, '删除、清空、上移、下移会立刻保存到配置；下面的「期刊列表」是原始 JSON，改完请点「保存」。'),
+      // [patch 2026-10-22s] 保存 / 立即检查 在左，清空全部靠最右
       React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 } },
         React.createElement('button', { style: s.btn, onClick: save, disabled: saving }, saving ? '保存中…' : '保存'),
         React.createElement('button', { style: s.btn, onClick: runNow, disabled: running }, running ? '检查中…' : '立即检查'),
         msg ? React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-tertiary, #999)' } }, msg) : null,
+        React.createElement('span', { style: { marginLeft: 'auto', display: 'flex', gap: 4 } },
+          confirmClear
+            ? React.createElement('span', { style: { display: 'flex', gap: 4 } },
+                React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', onClick: clearJournals }, '确认清空'),
+                React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', onClick: () => setConfirmClear(false) }, '取消'),
+              )
+            : React.createElement('button', { style: { ...s.btn, padding: '4px 8px' }, type: 'button', disabled: journalItems.length === 0, onClick: () => setConfirmClear(true) }, '清空全部'),
+        ),
       ),
       report ? React.createElement('pre', { style: { ...s.report, marginTop: 0, marginBottom: 8 } }, report) : null,
       React.createElement('div', { style: { marginBottom: 0 } },
