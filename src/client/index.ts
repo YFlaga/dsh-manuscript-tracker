@@ -301,7 +301,7 @@ function PaperCheckerPanel(props: any): any {
     )
 
   return React.createElement('div', { style: { padding: 16, maxWidth: 560 } },
-    React.createElement('div', { style: s.title }, '投稿状态检查 · 定时任务'),
+    React.createElement('div', { style: s.title }, '定时任务设置'),
     field('触发时间（HH:mm）', 'time', '08:00'),
     field('时区（IANA）', 'timezone', 'Asia/Shanghai'),
     React.createElement('div', { style: s.row },
