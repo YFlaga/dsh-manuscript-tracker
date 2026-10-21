@@ -916,6 +916,31 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
       let structure: any
       if (onLoggedIn) {
         try { structure = await onLoggedIn(ctx, okUrl) } catch (e) { structure = { error: String(e) } }
+        // [local patch 2026-10-22] 识别失败时先别关窗口：给用户最多 2 分钟在同一个登录态里打开「我的稿件 / 作者中心」
+        if (structure && structure.error && !structure.plan) {
+          const __deadline = Date.now() + 120000
+          const __seen = new Set((ctx.pages?.() ?? []).map((pg: any) => String(pg.url?.() ?? '')))
+          let __got: any = null
+          while (Date.now() < __deadline) {
+            await new Promise((r) => setTimeout(r, 3000))
+            const __fresh: string[] = []
+            for (const pg of ctx.pages?.() ?? []) {
+              const u = String(pg.url?.() ?? '')
+              if (u && !__seen.has(u)) __fresh.push(u)
+            }
+            if (!__fresh.length) continue
+            for (const u of __fresh) __seen.add(u)
+            for (const u of __fresh) {
+              try {
+                const again = await onLoggedIn(ctx, u)
+                if (again && !again.error && again.plan) { __got = again; break }
+              } catch {}
+            }
+            if (__got) break
+          }
+          if (__got) structure = __got
+          else structure.error += '（窗口多等了 2 分钟仍没识别到稿件列表：如果你在里面打开了「我的稿件」页，请把那个网址填到上面再点一次登录一次）'
+        }
       }
       return { ok: true, finalUrl: okUrl, waitedMs: Date.now() - startedAt, profileDir: dir, structure, pages: __pages, creds: __pcCreds ?? undefined }
     }
