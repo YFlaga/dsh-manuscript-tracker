@@ -1020,7 +1020,7 @@ async function loginOnce(baseUrl: string, browserPath?: string, onLoggedIn?: (ct
 		const plan = structure && structure.plan ? structure : null;
 		if (!structure) structure = { error: "没有识别到可用的稿件列表" };
 		if (!structure.plan) {
-			if (!loggedIn) structure = { error: "等了 " + Math.round(TRACE_CAP_MS / 6e4) + " 分钟没检测到登录成功（登录态可能已存进 profile，可再点一次试试）" };
+			if (!loggedIn) structure = { error: "等了 " + Math.round((Date.now() - startedAt) / 1000) + " 秒没检测到登录成功（登录态可能已存进 profile，可再点一次试试）" };
 			else if (!structure.error) structure = { error: "登录成功，但在你访问过的页面里没认出击稿列表——请把面板下方轨迹里「我的稿件」那条网址直接填进上方再点一次" };
 		}
 		return {
