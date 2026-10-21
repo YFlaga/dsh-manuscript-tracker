@@ -41,11 +41,20 @@ function PaperCheckerPanel(props: any): any {
   const [loginPlan, setLoginPlan] = React.useState<any>(null)
   // 登录一次时顺手记录到的账号密码（存进期刊条目，cookie 过期可自动重登）
   const [loginCreds, setLoginCreds] = React.useState<any>(null)
+  // 识别模型选择（结构识别用哪个 LLM；默认跟随 DSH 当前默认模型）
+  const [modelGroups, setModelGroups] = React.useState<any[]>([])
 
   const loadSessions = React.useCallback(() => {
     // 服务端把会话列表搭在 /config 上返回（/sessions 在渲染进程里会静默失败）
     fetchJson('/config').then((res: any) => {
       if (res && res.ok && Array.isArray(res.sessions)) setSessions(res.sessions)
+    }).catch(() => {})
+  }, [])
+
+  const loadProviders = React.useCallback(() => {
+    // DSH 0.2 不再暴露 connection.api.llm.models；服务端把 provider/模型列表搭在 /config 上
+    fetchJson('/config').then((res: any) => {
+      if (res && res.ok && Array.isArray(res.modelGroups)) setModelGroups(res.modelGroups)
     }).catch(() => {})
   }, [])
 
@@ -62,8 +71,9 @@ function PaperCheckerPanel(props: any): any {
       }
     }).catch((e: any) => { if (alive) setMsg('加载异常: ' + String(e)) })
     loadSessions()
+    loadProviders()
     return () => { alive = false }
-  }, [loadSessions])
+  }, [loadSessions, loadProviders])
 
   const save = async () => {
     if (!cfg) return
@@ -262,6 +272,25 @@ function PaperCheckerPanel(props: any): any {
     ),
     React.createElement('div', { style: { ...s.row, border: '1px dashed var(--dsw-alias-border-l1, #ccc)', borderRadius: 8, padding: 10 } },
       React.createElement('label', { style: s.label }, '➕ 新增期刊（登录一次 + 自动识别结构）'),
+      React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 6 } },
+        React.createElement('select', {
+          style: { ...s.input, flex: 1 },
+          value: cfg.discoverProvider || '',
+          onChange: (e: any) => setCfg({ ...cfg, discoverProvider: e.target.value, discoverModel: '' }),
+        },
+          React.createElement('option', { value: '' }, '识别模型 Provider（默认）'),
+          ...modelGroups.map((g: any) => React.createElement('option', { key: g.id, value: g.id }, g.name || g.id)),
+        ),
+        React.createElement('select', {
+          style: { ...s.input, flex: 1 },
+          value: cfg.discoverModel || '',
+          onChange: (e: any) => setCfg({ ...cfg, discoverModel: e.target.value }),
+        },
+          React.createElement('option', { value: '' }, '识别模型（默认）'),
+          ...(modelGroups.find((g: any) => g.id === cfg.discoverProvider)?.models || []).map((m: any) => React.createElement('option', { key: m.id, value: m.id }, m.name || m.id)),
+        ),
+        React.createElement('button', { style: s.btn, type: 'button', onClick: loadProviders, title: '刷新模型列表' }, '刷新'),
+      ),
       React.createElement('input', {
         style: { ...s.input, marginBottom: 6 },
         placeholder: '期刊入口网址，如 https://www.editorialmanager.com/conbuildmat',
@@ -294,7 +323,7 @@ function PaperCheckerPanel(props: any): any {
           React.createElement('button', { style: s.btn, type: 'button', onClick: addFromLogin }, '加入期刊列表'),
         ),
       ) : null,
-      React.createElement('div', { style: s.hint }, '登录成功后自动探测该系统的列表页/字段并写入本地结构缓存（~/.dsh/paper-checker/structures/）；同时把你在登录表单里输入的账号密码一并记录到期刊条目里（ORCID/SSO 登录没有表单则只靠持久化登录态）。加入列表并「保存」后，定时检查与「立即检查」都复用这份登录态。'),
+      React.createElement('div', { style: s.hint }, '上面的 Provider/模型 只用于「识别投稿系统结构」这一步（不影响 DSH 主对话模型；留空则用当前默认模型）。登录成功后自动探测该系统的列表页/字段并写入本地结构缓存（~/.dsh/paper-checker/structures/）；同时把你在登录表单里输入的账号密码一并记录到期刊条目里（ORCID/SSO 登录没有表单则只靠持久化登录态）。加入列表并「保存」后，定时检查与「立即检查」都复用这份登录态。'),
 
     ),
     React.createElement('div', { style: { ...s.row, border: '1px solid var(--dsw-alias-border-l1, #ccc)', borderRadius: 8, padding: 10 } },
