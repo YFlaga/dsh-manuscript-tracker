@@ -2009,10 +2009,20 @@ async function buildModelGroupsPC(llmService: any, settingsService: any): Promis
   } catch { /* 静默 */ }
   // 3) 兜底：默认 provider 至少出现在下拉里，否则面板只剩"默认"一项
   if (defProvider && !seen.has(defProvider)) push(defProvider, defProvider, defModel ? [{ id: defModel, name: defModel }] : [])
-  if (defProvider) {
-    const i = out.findIndex((g) => g.id === defProvider)
-    if (i > 0) out.unshift(out.splice(i, 1)[0])
-  }
+    // [local patch 2026-10-22c] 排序：官方 DeepSeek 账号排第一（用户默认用它识别），其次 agent-default-model 的 provider，其余按 id
+  const pcRank = (id: string): number => {
+    const s0 = String(id || "").toLowerCase();
+    if (s0 === "deepseek-account") return 0;
+    if (defProvider && s0 === String(defProvider).toLowerCase()) return 0.5;
+    if (s0.indexOf("deepseek") === 0) return 1;
+    return 2;
+  };
+  out.sort((a: any, b: any) => {
+    const ra = pcRank(a.id);
+    const rb = pcRank(b.id);
+    if (ra !== rb) return ra - rb;
+    return String(a.id).localeCompare(String(b.id));
+  })
   // [local patch 2026-10-22] 只留「有模型目录」的 provider（默认 provider 例外）
   return out.filter((g: any) => (g.models && g.models.length > 0) || g.id === defProvider)
 }
