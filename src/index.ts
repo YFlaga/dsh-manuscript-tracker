@@ -1784,7 +1784,7 @@ async function scrapeGenericJournal(j: JournalConfig, plan: StructurePlan, opts:
     // status 末尾附系统名，报告里一眼看出这条来自哪个系统。
     const tagged: Submission[] = subs.map((s) => ({
       ...s,
-      status: [s.status, sysLabel ? '（' + sysLabel + '）' : ''].join(''),
+      status: s.status,
     }))
     const sectionName = (plan.menuSections && plan.menuSections[0]) ? plan.menuSections[0] : sysLabel + ' 投稿列表'
     return {
@@ -2085,109 +2085,95 @@ function recentDecisions(subs: Submission[], today: Date, months: number): Submi
 }
 
 function formatReport(results: JournalResult[], dateStr: string, endedMonths: number = DEFAULT_ENDED_MONTHS): string {
-  // [patch 2026-10-22t] 已结束投稿的追溯月数（配置 endedMonths，最小 1）
-  const endMonths = Math.max(1, Number(endedMonths) || DEFAULT_ENDED_MONTHS)
-  const lines: string[] = [`📊 每日投稿状态报告 (${dateStr})`, '']
-  let total = 0
-  let decisionTotal = 0
-  // [patch 2026-10-22u] 已结束投稿总数（不计入活跃投稿）
-  let endedTotal = 0
-  const stageCounts: Record<Stage, number> = { submission: 0, revision: 0, production: 0 }
-  const today = new Date()
-  for (const r of results) {
-    lines.push(`**${r.journal}:**`)
-    if (r.error) {
-      lines.push(`- ⚠️ ${r.error}`)
-      continue
-    }
-    // 通用抓取器成功时 system 可能是 'other'/sNAPP 等；只有「没有抓取结果」才走人工兜底提示
-    if (r.system === 'other' && !(r.sections ?? []).length) {
-      lines.push('- 需 AI 手动检查（非 Editorial Manager，请用浏览器工具或 check_manuscript_status 交互式处理）')
-      continue
-    }
-    const sections = r.sections ?? []
-    // 报告分节：structure.groups 里每一组的第一个分区之前插入组标题
-    const groupsOf: { title: string; sections: string[] }[] = Array.isArray((r as any).groups) ? (r as any).groups : []
-    const groupOf = (n: string) => groupsOf.find((g) => Array.isArray(g.sections) && g.sections.includes(n))?.title ?? ''
-    let lastGroup = ''
-    const secLines: string[] = []
-    // [patch 2026-10-22u] 已结束投稿统一收集到这里，最后作为「已结束」小节输出
-    const endedLines: string[] = []
-    // [patch 2026-10-22v] 同一稿件可能同时出现在活跃分区与决策分区，按编号去重
-    const endedSeen = new Set<string>()
-    const pushEnded = (num: string | undefined, line: string): void => {
-      const k = String(num ?? '')
-      if (k && endedSeen.has(k)) return
-      if (k) endedSeen.add(k)
-      endedLines.push(line)
-      endedTotal++
-    }
-    let hasContent = false
-    for (const sec of sections) {
-      const gName = groupOf(sec.name)
-      if (gName && gName !== lastGroup) { secLines.push('### ' + gName); lastGroup = gName }
-      const subs = sec.submissions ?? []
-      // 决策历史分区：只列最近 7 天内的决策，独立分组，不计入活跃投稿。
-      if (sec.kind === 'decision') {
-        const recent = recentDecisions(subs, today, endMonths)
-        if (recent.length === 0) continue
-        hasContent = true
-        // [patch 2026-10-22u] 决策分区的条目并入统一「已结束」小节
-        for (const s of recent) {
-          const parts: string[] = []
-          if (s.statusDate) parts.push(`决策 ${s.statusDate}`)
-          pushEnded(s.number, `  - [${zh(s.status)}] ${s.number}: ${s.title}${parts.length ? '（' + parts.join('，') + '）' : ''}`)
-        }
-        continue
-      }
-      if (subs.length === 0) {
-        if ((sec.count ?? 0) > 0) secLines.push(`- ⚠️ ${sec.name}（计数 ${sec.count}，未抓到稿件列表）`)
-        continue
-      }
-      hasContent = true
-      secLines.push(`- 📂 ${sec.name}（${sec.count}）`)
-      for (const s of subs) {
-        // [patch 2026-10-22u] 已结束（接受/拒稿/发表…）不算活跃投稿：窗口内的收进「已结束」小节
-        if (pcIsEndedStatus(s.status)) {
-          if (pcWithinMonths(today, s.statusDate, endMonths)) {
-            const eparts: string[] = []
-            if (s.submitted) eparts.push(`投稿 ${s.submitted}`)
-            if (s.statusDate) eparts.push(`更新 ${s.statusDate}`)
-            pushEnded(s.number, `  - [${zh(s.status)}] ${s.number}: ${s.title}${eparts.length ? '（' + eparts.join('，') + '）' : ''}`)
-          }
-          continue
-        }
-        const stage = stageOf(sec.name, s.status)
-        stageCounts[stage]++
-        total++
-        const parts: string[] = []
-        if (s.submitted) parts.push(`投稿 ${s.submitted}`)
-        if (s.statusDate) parts.push(`更新 ${s.statusDate}`)
-        if (s.revDue) parts.push(`截止 ${s.revDue}`)
-        secLines.push(`  - [${zh(s.status)}] ${s.number}: ${s.title}${parts.length ? '（' + parts.join('，') + '）' : ''}`)
-      }
-    }
-    // [patch 2026-10-22u] 「已结束」小节（接受/拒稿/发表等，不计入活跃投稿）
-    if (endedLines.length) {
-      hasContent = true
-      secLines.push(`- 📂 已结束（最近 ${endMonths} 个月）`)
-      for (const line of endedLines) secLines.push(line)
-    }
-    if (!hasContent) {
-      lines.push('- 无活跃投稿（所有分区计数均为 0）。')
-      lines.push('')
-      continue
-    }
-    lines.push(...secLines)
-    lines.push('')
-  }
-  const stageSummary = (['submission', 'revision', 'production'] as Stage[])
-    .filter((k) => stageCounts[k] > 0)
-    .map((k) => `${STAGE_ZH[k]} ${stageCounts[k]} 篇`)
-  let summary = `**摘要:** 共 ${total} 篇活跃投稿${stageSummary.length ? '（' + stageSummary.join(' · ') + '）' : ''}`
-  if (endedTotal > 0) summary += ` · 已结束 ${endedTotal} 篇`
-  lines.push(summary + '。')
-  return lines.join('\n')
+	// [patch 2026-10-23c] 汇报结构：期刊名后直接给活跃/已结束数量，不再输出分区标题行
+	const endMonths = Math.max(1, Number(endedMonths) || DEFAULT_ENDED_MONTHS);
+	const lines = [`📊 每日投稿状态报告 (${dateStr})`, ""];
+	let total = 0;
+	let endedTotal = 0;
+	const stageCounts: Record<string, number> = { submission: 0, revision: 0, production: 0 };
+	const today = new Date();
+	for (const r of results) {
+		const secLines: string[] = [];
+		const endedLines: string[] = [];
+		const endedSeen = new Set();
+		const pushEnded = (num: any, line: string) => {
+			const k = String(num ?? "");
+			if (k && endedSeen.has(k)) return;
+			if (k) endedSeen.add(k);
+			endedLines.push(line);
+			endedTotal++;
+		};
+		let journalActive = 0;
+		let journalEnded = 0;
+		let errorLine = "";
+		if (r.error) {
+			errorLine = `- ⚠️ ${r.error}`;
+		}
+		else if (r.system === "other" && !(r.sections ?? []).length) {
+			errorLine = "- 需 AI 手动检查（非 Editorial Manager，请用浏览器工具或 check_manuscript_status 交互式处理）";
+		}
+		else {
+			for (const sec of r.sections ?? []) {
+				const subs = sec.submissions ?? [];
+				if (sec.kind === "decision") {
+					for (const s of recentDecisions(subs, today, endMonths)) {
+						const parts = [];
+						if (s.statusDate) parts.push(`决策 ${s.statusDate}`);
+						const before = endedLines.length;
+						pushEnded(s.number, `  - [${zh(s.status)}] ${s.number}: ${s.title}${parts.length ? "（" + parts.join("，") + "）" : ""}`);
+						if (endedLines.length > before) journalEnded++;
+					}
+					continue;
+				}
+				if (subs.length === 0) {
+					if ((sec.count ?? 0) > 0) secLines.push(`- ⚠️ ${sec.name}（计数 ${sec.count}，未抓到稿件列表）`);
+					continue;
+				}
+				for (const s of subs) {
+					if (pcIsEndedStatus(s.status)) {
+						if (pcWithinMonths(today, s.statusDate, endMonths)) {
+							const eparts = [];
+							if (s.submitted) eparts.push(`投稿 ${s.submitted}`);
+							if (s.statusDate) eparts.push(`更新 ${s.statusDate}`);
+							const before = endedLines.length;
+							pushEnded(s.number, `  - [${zh(s.status)}] ${s.number}: ${s.title}${eparts.length ? "（" + eparts.join("，") + "）" : ""}`);
+							if (endedLines.length > before) journalEnded++;
+						}
+						continue;
+					}
+					const stage = stageOf(sec.name, s.status);
+					stageCounts[stage]++;
+					total++;
+					journalActive++;
+					const parts = [];
+					if (s.submitted) parts.push(`投稿 ${s.submitted}`);
+					if (s.statusDate) parts.push(`更新 ${s.statusDate}`);
+					if (s.revDue) parts.push(`截止 ${s.revDue}`);
+					secLines.push(`  - [${zh(s.status)}] ${s.number}: ${s.title}${parts.length ? "（" + parts.join("，") + "）" : ""}`);
+				}
+			}
+		}
+		if (errorLine) {
+			lines.push(`**${r.journal}:**`);
+			lines.push(errorLine);
+			lines.push("");
+			continue;
+		}
+		lines.push(`${r.journal}：活跃投稿 ${journalActive} 个，已结束投稿 ${journalEnded} 个`);
+		if (!secLines.length && !endedLines.length) {
+			lines.push("- 无活跃投稿（所有分区计数均为 0）。");
+			lines.push("");
+			continue;
+		}
+		lines.push(...secLines);
+		lines.push(...endedLines);
+		lines.push("");
+	}
+	const stageSummary = ["submission", "revision", "production"].filter((k) => stageCounts[k] > 0).map((k) => `${(STAGE_ZH as any)[k]} ${stageCounts[k]} 篇`);
+	let summary = `**摘要:** 共 ${total} 篇活跃投稿${stageSummary.length ? "（" + stageSummary.join(" · ") + "）" : ""}`;
+	if (endedTotal > 0) summary += ` · 已结束 ${endedTotal} 篇`;
+	lines.push(summary + "。");
+	return lines.join("\n");
 }
 
 function pushServerChan(key: string, title: string, desp: string): Promise<boolean> {
@@ -2476,7 +2462,7 @@ async function reportToSession(agents: any, sessions: any, sessionId: string, re
     if (__sc0 && typeof __sc0.prompt === "function" && sessionId) {
       const __pcTz: any = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch (e) { return void 0 } })()
     const __pcReqId: string = (() => { try { const c: any = (globalThis as any).crypto; if (c && typeof c.randomUUID === "function") return c.randomUUID() } catch (e) { /* fallback */ } return String(Date.now()) + "-" + Math.random().toString(16).slice(2) })()
-    const __pcReq: any = { requestId: __pcReqId, sessionId, mode: "queue", content: [{ type: "text", text: "\u23f0 \u6bcf\u65e5\u6295\u7a3f\u72b6\u6001\u81ea\u52a8\u6c47\u62a5\uff08\u63d2\u4ef6 dsh-manuscript-tracker\uff09\uff1a\n\n" + report + "\n\n\u2014\u2014\u8bf7\u4e00\u53e5\u8bdd\u786e\u8ba4\u6536\u5230\u5373\u53ef\uff0c\u4e0d\u8981\u91cd\u65b0\u68c0\u67e5\u3001\u4e0d\u8981\u8c03\u7528\u5de5\u5177\u3002" }] }
+    const __pcReq: any = { requestId: __pcReqId, sessionId, mode: "queue", content: [{ type: "text", text: ""  + report + "\n\n\u2014\u2014\u8bf7\u4e00\u53e5\u8bdd\u786e\u8ba4\u6536\u5230\u5373\u53ef\uff0c\u4e0d\u8981\u91cd\u65b0\u68c0\u67e5\u3001\u4e0d\u8981\u8c03\u7528\u5de5\u5177\u3002" }] }
     if (__pcTz) __pcReq.clientTimeZone = __pcTz
     await __sc0.prompt(__pcReq, new AbortController().signal)
       return "ok"
