@@ -2470,11 +2470,15 @@ function listLiveSessions(agents: any, sessions: any, sessionTitle: any): any[] 
  * ensureSession(sessionId, cwd, checkPersistedIdentity) 按需载入（它返回 live agent），
  * 所以目标会话不必提前打开。返回 'ok' 或失败原因。 */
 async function reportToSession(agents: any, sessions: any, sessionId: string, report: string): Promise<string> {
-  // [patch 2026-10-22e] public host entry: sessionController.prompt resumes a cold session then followup
+  // [patch 2026-10-22e/w] public host entry: sessionController.prompt(request, signal) resumes a cold session then followup
   try {
     const __sc0: any = (__pcSCRef as any) || ((__pcCtx && typeof (__pcCtx as any).get === "function") ? (__pcCtx as any).get("sessionController") : null)
     if (__sc0 && typeof __sc0.prompt === "function" && sessionId) {
-      await __sc0.prompt({ sessionId, content: [{ type: "text", text: "\u23f0 \u6bcf\u65e5\u6295\u7a3f\u72b6\u6001\u81ea\u52a8\u6c47\u62a5\uff08\u63d2\u4ef6 dsh-manuscript-tracker\uff09\uff1a\n\n" + report + "\n\n\u2014\u2014\u8bf7\u4e00\u53e5\u8bdd\u786e\u8ba4\u6536\u5230\u5373\u53ef\uff0c\u4e0d\u8981\u91cd\u65b0\u68c0\u67e5\u3001\u4e0d\u8981\u8c03\u7528\u5de5\u5177\u3002" }] }, { kind: "user" })
+      const __pcTz: any = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch (e) { return void 0 } })()
+    const __pcReqId: string = (() => { try { const c: any = (globalThis as any).crypto; if (c && typeof c.randomUUID === "function") return c.randomUUID() } catch (e) { /* fallback */ } return String(Date.now()) + "-" + Math.random().toString(16).slice(2) })()
+    const __pcReq: any = { requestId: __pcReqId, sessionId, mode: "queue", content: [{ type: "text", text: "\u23f0 \u6bcf\u65e5\u6295\u7a3f\u72b6\u6001\u81ea\u52a8\u6c47\u62a5\uff08\u63d2\u4ef6 dsh-manuscript-tracker\uff09\uff1a\n\n" + report + "\n\n\u2014\u2014\u8bf7\u4e00\u53e5\u8bdd\u786e\u8ba4\u6536\u5230\u5373\u53ef\uff0c\u4e0d\u8981\u91cd\u65b0\u68c0\u67e5\u3001\u4e0d\u8981\u8c03\u7528\u5de5\u5177\u3002" }] }
+    if (__pcTz) __pcReq.clientTimeZone = __pcTz
+    await __sc0.prompt(__pcReq, new AbortController().signal)
       return "ok"
     }
   } catch (e) {
