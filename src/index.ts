@@ -1468,6 +1468,15 @@ async function pcRecognizeStructure(opts: {
       }, baseUrl)
     }
     if (!plan) return { error: '结构识别失败: ' + (llmErr || ('模型返回为空（' + provider + (model ? ' / ' + model : '') + '），可在配置页换一个识别模型再试')) }
+    // [patch 2026-10-23b] 登录页/门户页上识别出来的结构不可信（没有行选择器/关键字段，或页面本身还在登录流程里），不落盘
+    {
+      const digPages = String(JSON.stringify(dig?.pages ?? ''))
+      const looksLogin = pcIsLoginishPlan(plan) || PC_LOGIN_URL_RE.test(String(plan.listUrl ?? '')) ||
+        /accounts\.taylorfrancis\.com|\/identity|orcid\.org\/signin/i.test(digPages)
+      if (looksLogin && !emHint) {
+        return { error: '这次识别是在登录页上做的（页面还在登录流程里），结构不可信、已丢弃。请点「登录一次」完成 ORCID/SSO 登录并打开稿件列表页，再点一次识别。' }
+      }
+    }
     const planPath = pcStructurePath(baseUrl)
     writeFileSync(planPath, JSON.stringify({
       baseUrl,
@@ -1589,6 +1598,99 @@ async function pg0WaitRows(page: any, sel: string, ms: number): Promise<boolean>
         return false;
     }
 }
+/** [patch 2026-10-23b] plan 是否只是登录页的产物（没有行选择器/关键字段就不可信）。 */
+function pcIsLoginishPlan(plan: any): boolean {
+  const rowSel = String(plan?.rowSelector ?? '').trim()
+  const f = plan?.fields ?? {}
+  return !rowSel || !String(f.number ?? '').trim() || !String(f.title ?? '').trim()
+}
+/** [patch 2026-10-23b] 页面现在是「登录页」还是「已登录的列表页」。goto 之后前端可能还在跳转，所以必须轮询。 */
+async function pcListState(page: any, ms: number): Promise<{ state: string; cards: number; url: string }> {
+  const end = Date.now() + Math.max(1000, ms || 12000)
+  let lastUrl = ''
+  while (Date.now() < end) {
+    lastUrl = String(page.url?.() ?? '')
+    let cards = -1
+    try {
+      cards = await page.evaluate(() => document.querySelectorAll('div.submission.card').length)
+    } catch { /* 页面跳转中，忽略 */ }
+    if (cards > 0) return { state: 'rows', cards, url: lastUrl }
+    const hasPw = await page.locator("input[type='password']").count().catch(() => 0)
+    if (hasPw > 0) return { state: 'login', cards: 0, url: lastUrl }
+    if (/accounts\.taylorfrancis\.com\/identity|orcid\.org\/signin|\/login|login\.aspx?|\/signin/i.test(lastUrl)) return { state: 'login', cards: 0, url: lastUrl }
+    await new Promise((r) => setTimeout(r, 800))
+  }
+  return { state: 'unknown', cards: 0, url: lastUrl }
+}
+/** [patch 2026-10-23b] 抓取时被重定向到登录页 → 用期刊条目里记录的账号密码自动重登一次。 */
+async function pcAutoRelogin(ctx: any, page: any, originUrl: string, j: any): Promise<{ ok: boolean; via?: string; page?: any; error?: string }> {
+  const errOf = (e: any) => String((e && e.message) || e).split('\n')[0].slice(0, 200)
+  const user = String(j?.username ?? '').trim()
+  const pass = String(j?.password ?? '')
+  const looksOrcid = /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/i.test(user)
+  const pagesOf = (): any[] => (ctx && typeof ctx.pages === 'function' ? ctx.pages() : [page])
+  const hostOf = (u: string) => { try { return new URL(u).hostname.toLowerCase() } catch { return '' } }
+  const backPoll = async (ms: number): Promise<{ ok: boolean; page?: any }> => {
+    const end = Date.now() + ms
+    while (Date.now() < end) {
+      for (const p of pagesOf()) {
+        const u = String(p.url?.() ?? '')
+        if (hostOf(u) === hostOf(originUrl)) {
+          const cards = await p.evaluate(() => document.querySelectorAll('div.submission.card').length).catch(() => 0)
+          const hasPw = await p.locator("input[type='password']").count().catch(() => 0)
+          if (cards > 0 || hasPw === 0) return { ok: true, page: p }
+        }
+      }
+      await new Promise((r) => setTimeout(r, 800))
+    }
+    return { ok: false }
+  }
+  if (!user || !pass) return { ok: false, error: '期刊条目里没有保存账号密码' }
+
+  // ① T&F 统一身份 → ORCID
+  const orcidBtn = await page.$('#orcidBtn').catch(() => null)
+  if (orcidBtn && looksOrcid) {
+    try {
+      await orcidBtn.click()
+    } catch (e) {
+      return { ok: false, error: '点「Login with ORCID」失败：' + errOf(e) }
+    }
+    let target = page
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 500))
+      const hit = pagesOf().find((p) => { try { return /orcid\.org\/signin/i.test(p.url()) } catch { return false } })
+      if (hit) { target = hit; break }
+      if (/orcid\.org\/signin/i.test(String(page.url?.() ?? ''))) break
+    }
+    try {
+      await target.waitForSelector('#username-input', { timeout: 25000 })
+      await target.fill('#username-input', user)
+      await target.fill('#password', pass)
+      await target.click('#signin-button')
+    } catch (e) {
+      return { ok: false, error: 'ORCID 表单填写/提交失败：' + errOf(e) }
+    }
+    const back = await backPoll(60000)
+    if (back.ok) return { ok: true, via: 'orcid', page: back.page }
+    return { ok: false, error: 'ORCID 已提交，但 60s 内没回到已登录的投稿系统页面' }
+  }
+
+  // ② 通用账号密码表单
+  try {
+    const pwSel = (await page.$('#inputPassword')) ? '#inputPassword' : "input[type='password']"
+    if (!(await page.$(pwSel))) return { ok: false, error: '登录页上没有密码输入框（也没有 ORCID 按钮）' }
+    const emailSel = (await page.$('#inputEmail')) ? '#inputEmail' : "input[name='username'], input[name='email'], input[type='email']"
+    await page.fill(emailSel, user).catch(() => {})
+    await page.fill(pwSel, pass).catch(() => {})
+    const btn = (await page.$('#loginBtn')) || (await page.$("button[type='submit'], input[type='submit']"))
+    if (btn) await btn.click().catch(() => {})
+    const back = await backPoll(45000)
+    if (back.ok) return { ok: true, via: 'password', page: back.page }
+    return { ok: false, error: '账号密码已提交，但 45s 内没回到已登录的投稿系统页面' }
+  } catch (e) {
+    return { ok: false, error: '账号密码自动登录失败：' + errOf(e) }
+  }
+}
 async function scrapeGenericJournal(j: JournalConfig, plan: StructurePlan, opts: ScrapeEnv & {
   browserPath?: string
 }): Promise<JournalResult> {
@@ -1615,6 +1717,29 @@ async function scrapeGenericJournal(j: JournalConfig, plan: StructurePlan, opts:
         journal: j.name, system,
         error: sysLabel + '：打开列表页失败（' + listUrl + '）：' + String(e).split('\n')[0].slice(0, 240) +
           '；已复用登录态：' + pcProfileDir() + '（如过期请再点一次「登录一次」）',
+      }
+    }
+    // [patch 2026-10-23b] 先看页面是「列表行」还是「登录页」（goto 后前端可能还在跳转，必须轮询）
+    let listState = await pcListState(page, 14000)
+    if (listState.state === 'login') {
+      const rl = await pcAutoRelogin(browser, page, listUrl, j)
+      if (!rl.ok) {
+        return {
+          journal: j.name, system,
+          error: sysLabel + '：登录态已过期（' + listUrl + ' 被重定向到登录页），自动重新登录失败：' + String(rl.error || '未知原因') +
+            '；请点一次「登录一次」重新登录后再检查。',
+        }
+      }
+      try {
+        await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
+      } catch { /* 交给后面的等待逻辑 */ }
+      listState = await pcListState(page, 20000)
+      if (listState.state === 'login') {
+        return {
+          journal: j.name, system,
+          error: sysLabel + '：已用记录的账号密码重新登录，但仍被重定向到登录页（' + String(listState.url).slice(0, 160) +
+            '）；请点一次「登录一次」重新登录。',
+        }
       }
     }
     // [local patch 2026-10-22d] 等列表真正渲染出来（很多投稿系统是前端框架，domcontentloaded 时行还没出来）
